@@ -61,7 +61,7 @@ jobs:
       - name: Set variables
         run: |
           echo "IS_PULL_REQUEST=${{ fromJSON(env.EVENT_JSON).pull_request != '' }}" >> $GITHUB_ENV
-          echo "PR_NUMBER=${{ fromJSON(env.EVENT_JSON).issue.number || fromJSON(env.EVENT_JSON).number }}" >> $GITHUB_ENV
+          echo "PR_NUMBER=${{ fromJSON(env.EVENT_JSON).number }}" >> $GITHUB_ENV
           echo "IMAGE_NAME=${{ fromJSON(env.DATA_JSON).image_name }}" >> $GITHUB_ENV
 
       - name: Configure Bunnyshell AWS Credentials
@@ -70,6 +70,7 @@ jobs:
           aws-access-key-id: ${{ secrets.bunnyshell_cr_username }}
           aws-secret-access-key: ${{ secrets.bunnyshell_cr_password }}
           aws-region: eu-west-1
+          mask-aws-account-id: 'no'
 
       - name: Login to Bunnyshell Container Registry
         uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a # v2.1.0
