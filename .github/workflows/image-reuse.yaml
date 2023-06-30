@@ -149,7 +149,7 @@ jobs:
           push: ${{ inputs.push }}
           tags: ${{ env.TAGS }}
           target: ${{ inputs.target }}
-          outputs: ${{ inputs.push && "" || "type=docker,dest=.bunnyshell-tmp/artifact/image.tar" }}
+          outputs: ${{ inputs.push && '' || 'type=docker,dest=.bunnyshell-tmp/artifact/image.tar' }}
           provenance: false
           sbom: false
           build-args: |
