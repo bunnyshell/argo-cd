@@ -161,7 +161,7 @@ jobs:
           context: .
           platforms: ${{ inputs.platforms }}
           push: ${{ inputs.push }}
-          tags: ${{ env.TAGS }}
+          tags: builder #todo bns: rollback to ${{ env.TAGS }}
           target: ${{ inputs.target }}
           outputs: ${{ inputs.push && '' || 'type=docker,dest=.bunnyshell-tmp/artifact/image.tar' }}
           provenance: false
