@@ -91,6 +91,7 @@ jobs:
     outputs:
       bunnyshell-yaml-contents: ${{ steps.prepare-bunnyshell-yaml.outputs.contents }}
       git-ref: ${{ steps.determine-git-ref.outputs.git-ref }}
+      pr-number: ${{ steps.determine-git-ref.outputs.pr-number }}
     steps:
       - name: Show GITHUB_CONTEXT #todo bns: todel
         env:
@@ -102,9 +103,11 @@ jobs:
       - name: determine-git-ref
         id: determine-git-ref
         run: |
-          gitRef="${{ format('refs/pull/{0}/head', needs.load-artifact.outputs.pr-number || github.event.issue.number) }}"
+          prNumber=${{ needs.load-artifact.outputs.pr-number || github.event.issue.number) }}
+          gitRef="${{ format('refs/pull/{0}/head', prNumber) }}"
 
           echo "git-ref=$gitRef" >> "$GITHUB_OUTPUT"
+          echo "pr-number=$prNumber" >> "$GITHUB_OUTPUT"
       - name: Compute artifacts names
         run: |
           artifactName="argocd-image-${{ needs.load-artifact.outputs.pr-number || github.event.issue.number }}.txt"
@@ -177,7 +180,7 @@ jobs:
     name: Deploy Environment
     needs: prepare
     if: ${{ github.event_name == 'issue_comment' || (github.event_name == 'workflow_run') }} #todo bns: fix also with labels && contains(github.event.pull_request.labels.*.name, 'bns:preview')) }}
-    uses: bunnyshell/workflows/.github/workflows/prepare-and-deploy-env.yaml@f7f9ad94030d3e5c69c72f2d480bd360acb5545c # v1.0.3 #todo bns: fix to a gitSha
+    uses: bunnyshell/workflows/.github/workflows/prepare-and-deploy-env.yaml@02c93566e977ac0918432f253e70a4a3b4893884 # v1.0.3 #todo bns: fix to a gitSha
     with:
       project-id: ${{ vars.BUNNYSHELL_PROJECT_ID }}
       cluster-id: ${{ vars.BUNNYSHELL_CLUSTER_ID }}
@@ -185,6 +188,7 @@ jobs:
       bunnyshell-yaml-contents: ${{ needs.prepare.outputs.bunnyshell-yaml-contents }}
       allowed-users: ${{ vars.BUNNYSHELL_ALLOWED_USERS }}
       comment-on-pr: true
+      pr-number: ${{ needs.prepare.outputs.pr-number }}
       deploy-as-stopped: ${{ github.event_name == 'workflow_run' }}
       git-ref: ${{ needs.prepare.outputs.git-ref }}
       restricted-files: |
