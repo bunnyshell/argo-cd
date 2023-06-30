@@ -1,5 +1,7 @@
 name: Bunnyshell - Deploy Preview Environment
+
 concurrency: bns-deploy-${{ github.event.number || github.event.issue.number }}
+
 on:
   workflow_run:
     workflows:
@@ -8,6 +10,7 @@ on:
       - completed
   issue_comment:
     types: [ created, edited ]
+
 jobs:
   load-artifact:
     name: Load bunnyshell artifact
@@ -15,8 +18,8 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
     outputs:
       pr-number: ${{ env.PR_NUMBER }}
-      is-pull-request-event: ${{ env.IS_PULL_REQUEST }} #todo bns: do I need this?
       image-name: ${{ env.IMAGE_NAME }}
+      pr-has-preview-labels: ${{ env.PR_HAS_PREVIEW_LABELS }}
     steps:
       - name: Show GITHUB_CONTEXT #todo bns: todel
         env:
@@ -60,9 +63,9 @@ jobs:
 
       - name: Set variables
         run: |
-          echo "IS_PULL_REQUEST=${{ fromJSON(env.EVENT_JSON).pull_request != '' }}" >> $GITHUB_ENV
           echo "PR_NUMBER=${{ fromJSON(env.EVENT_JSON).number }}" >> $GITHUB_ENV
           echo "IMAGE_NAME=${{ fromJSON(env.DATA_JSON).image_name }}" >> $GITHUB_ENV
+          echo "PR_HAS_PREVIEW_LABELS=${{ contains(env.EVENT_JSON.pull_request.labels.*.name, 'bns:preview') }}" >> $GITHUB_ENV
 
       - name: Configure Bunnyshell AWS Credentials
         uses: aws-actions/configure-aws-credentials@5fd3084fc36e372ff1fff382a39b10d03659f355 # v2.2.0
@@ -92,6 +95,7 @@ jobs:
       bunnyshell-yaml-contents: ${{ steps.prepare-bunnyshell-yaml.outputs.contents }}
       git-ref: ${{ env.GIT_REF }}
       pr-number: ${{ env.PR_NUMBER }}
+      pr-has-preview-labels: ${{ needs.load-artifact.outputs.pr-has-preview-labels }}
     steps:
       - name: Show GITHUB_CONTEXT #todo bns: todel
         env:
@@ -178,8 +182,8 @@ jobs:
       pull-requests: write
     name: Deploy Environment
     needs: prepare
-    if: ${{ always() && needs.prepare.result == 'success' }} # github.event_name == 'issue_comment' || (github.event_name == 'workflow_run')) }} #todo bns: fix also with labels && contains(github.event.pull_request.labels.*.name, 'bns:preview')) }}
-    uses: bunnyshell/workflows/.github/workflows/prepare-and-deploy-env.yaml@02c93566e977ac0918432f253e70a4a3b4893884 # v1.0.3 #todo bns: fix to a gitSha
+    if: ${{ always() && needs.prepare.result == 'success' && (needs.prepare.outputs.pr-has-preview-labels || github.event_name == 'issue_comment') }}
+    uses: bunnyshell/workflows/.github/workflows/prepare-and-deploy-env.yaml@02c93566e977ac0918432f253e70a4a3b4893884 # v1.0.4 #todo bns: fix to a gitSha
     with:
       project-id: ${{ vars.BUNNYSHELL_PROJECT_ID }}
       cluster-id: ${{ vars.BUNNYSHELL_CLUSTER_ID }}

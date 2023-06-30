@@ -1,19 +1,24 @@
 name: Bunnyshell - Delete Preview Environment
+
 concurrency: bns-delete-${{ github.event.number || github.event.issue.number }}
+
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
     branches:
       - '*'
   issue_comment:
       types: [ created, edited ]
+
 jobs:
   start:
+    permissions:
+      pull-requests: write
     name: Delete Environment
-    uses: bunnyshell/workflows/.github/workflows/delete-env.yaml@840efd407ae0c37f11d60f7d6a8a505eed4386a0 #todo bns: fix to a gitSha
+    uses: bunnyshell/workflows/.github/workflows/delete-env.yaml@02c93566e977ac0918432f253e70a4a3b4893884 # v1.0.4 #todo bns: fix to a gitSha
     with:
       project-id: ${{ vars.BUNNYSHELL_PROJECT_ID }}
-      env-name: 'ArgoCD PR #${{ github.event.issue.number }}'
+      env-name: 'ArgoCD PR #${{ github.event.number || github.event.issue.number }}'
       allowed-users: ${{ vars.BUNNYSHELL_ALLOWED_USERS }}
       comment-on-pr: true
     secrets:
