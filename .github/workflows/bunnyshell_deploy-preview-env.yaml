@@ -20,8 +20,13 @@ jobs:
     steps:
       - name: Download artifact
         uses: actions/github-script@v6
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }} #todo bns: todel
         with:
           script: | #todo bns: can I replace these with: gh run download <run-id> -n <name> --dir The directory to download artifacts into (default ".")
+            echo "$GITHUB_CONTEXT" #todo bns: todel
+
+
             let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
                owner: context.repo.owner,
                repo: context.repo.repo,
@@ -90,7 +95,11 @@ jobs:
         uses: frenck/action-setup-yq@c4b5be8b4a215c536a41d436757d9feb92836d4f # v1.0.2
       - name: determine-git-ref
         id: determine-git-ref
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }} #todo bns: todel
         run: |
+          echo "$GITHUB_CONTEXT" #todo bns: todel
+
           gitRef="${{ format('refs/pull/{0}/head', needs.load-artifact.outputs.pr-number || github.event.issue.number) }}"
 
           echo "git-ref=$gitRef" >> "$GITHUB_OUTPUT"
