@@ -104,7 +104,7 @@ jobs:
         id: determine-git-ref
         run: |
           prNumber=${{ needs.load-artifact.outputs.pr-number || github.event.issue.number }}
-          gitRef="${{ format('refs/pull/{0}/head', prNumber) }}"
+          gitRef="${{ format('refs/pull/{0}/head', $prNumber) }}"
 
           echo "git-ref=$gitRef" >> "$GITHUB_OUTPUT"
           echo "pr-number=$prNumber" >> "$GITHUB_OUTPUT"
