@@ -48,7 +48,6 @@ jobs:
       contents: read
       packages: write  # for pushing packages to GHCR, which is used by cd.apps.argoproj.io to avoid polluting Quay with tags
       id-token: write # for creating OIDC tokens for signing.
-      pull-requests: write # for Bunnyshell preview environment
     if: ${{ github.repository == 'bunnyshell/argo-cd' && github.event_name != 'push' }} #todo bns: rollback to argoproj/argo-cd
     uses: ./.github/workflows/image-reuse.yaml
     with:
@@ -57,8 +56,7 @@ jobs:
       go-version: 1.20
       platforms: ${{ needs.set-vars.outputs.platforms }}
       push: false
-      push_bunnyshell: true
-    secrets:
+    secrets: #todo bns: todel these
       bunnyshell_cr_username: ${{ secrets.bunnyshell_cr_username }}
       bunnyshell_cr_password: ${{ secrets.bunnyshell_cr_password }}
       bunnyshell_preview_password: ${{ secrets.bunnyshell_preview_password }}

@@ -1,35 +1,86 @@
 name: Bunnyshell - Deploy Preview Environment
 concurrency: bns-deploy-${{ github.event.number || github.event.issue.number }}
 on:
-  workflow_call:
-    inputs:
-      git-ref:
-        description: 'The git ref to use'
-        type: string
-        required: true
-      argocd-image:
-        description: 'ArgoCD image to use'
-        type: string     
-        required: true
-        default: 'quay.io/argoproj/argocd:latest'
-      bunnyshell-yaml-path:
-        description: 'bunnyshell.yaml file to start from'
-        type: string
-        required: false
-        default: .bunnyshell/templates/preview/bunnyshell.yaml
-    secrets:
-      bunnyshell_preview_password:
-        required: true
-      bunnyshell_access_token:
-        required: true
-      bunnyshell_encryption_passphrase:
-        required: true
+  workflow_run:
+    workflows:
+      - "Image"
+    types:
+      - completed
   issue_comment:
     types: [ created, edited ]
 jobs:
+  load-artifact:
+    name: Load bunnyshell artifact
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    outputs:
+      pr-number: ${{ env.PR_NUMBER }}
+      is-pull-request-event: ${{ env.IS_PULL_REQUEST }} #todo bns: do I need this?
+      image-name: ${{ env.IMAGE_NAME }}
+    steps:
+      - name: Download artifact
+        uses: actions/github-script@v6
+        with:
+          script: | #todo bns: can I replace these with: gh run download <run-id> -n <name> --dir The directory to download artifacts into (default ".")
+            let allArtifacts = await github.rest.actions.listWorkflowRunArtifacts({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               run_id: context.payload.workflow_run.id,
+            });
+            let matchArtifact = allArtifacts.data.artifacts.filter((artifact) => {
+              return artifact.name == "bunnyshell"
+            })[0];
+            if (matchArtifact === undefined) {
+              throw TypeError('Bunnyshell Artifact not found!');
+            }
+            let download = await github.rest.actions.downloadArtifact({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               artifact_id: matchArtifact.id,
+               archive_format: 'zip',
+            });
+            let fs = require('fs');
+            fs.writeFileSync(`${process.env.GITHUB_WORKSPACE}/artifact.zip`, Buffer.from(download.data));
+      - name: Load artifact data
+        run: |
+          unzip artifact.zip
+
+          echo 'EVENT_JSON<<EOFEVENTJSON' >> $GITHUB_ENV
+          cat event.json >> $GITHUB_ENV
+          echo -e '\nEOFEVENTJSON' >> $GITHUB_ENV
+
+          echo 'DATA_JSON<<EOFDATAJSON' >> $GITHUB_ENV
+          cat data.json >> $GITHUB_ENV
+          echo -e '\nEOFDATAJSON' >> $GITHUB_ENV
+
+      - name: Set variables
+        run: |
+          echo "IS_PULL_REQUEST=${{ fromJSON(env.EVENT_JSON).pull_request != '' }}" >> $GITHUB_ENV
+          echo "PR_NUMBER=${{ fromJSON(env.EVENT_JSON).issue.number || fromJSON(env.EVENT_JSON).number }}" >> $GITHUB_ENV
+          echo "IMAGE_NAME=${{ fromJSON(env.DATA_JSON).image_name }}" >> $GITHUB_ENV
+
+      - name: Configure Bunnyshell AWS Credentials
+        uses: aws-actions/configure-aws-credentials@5fd3084fc36e372ff1fff382a39b10d03659f355 # v2.2.0
+        with:
+          aws-access-key-id: ${{ secrets.bunnyshell_cr_username }}
+          aws-secret-access-key: ${{ secrets.bunnyshell_cr_password }}
+          aws-region: eu-west-1
+
+      - name: Login to Bunnyshell Container Registry
+        uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a # v2.1.0
+        with:
+          registry: 904643107945.dkr.ecr.eu-west-1.amazonaws.com
+
+      - name: Push image to Bunnyshell Container Registry
+        run: |
+          docker load --input image.tar
+          docker push ${{ env.IMAGE_NAME }}
+
   prepare:
     permissions:
       contents: read
+    needs: load-artifact
+    if: ${{ always() }}
     runs-on: ubuntu-22.04
     outputs:
       bunnyshell-yaml-contents: ${{ steps.prepare-bunnyshell-yaml.outputs.contents }}
@@ -40,19 +91,19 @@ jobs:
       - name: determine-git-ref
         id: determine-git-ref
         run: |
-          gitRef="${{ inputs.git-ref || format('refs/pull/{0}/head', github.event.issue.number) }}"
+          gitRef="${{ format('refs/pull/{0}/head', needs.load-artifact.outputs.pr-number || github.event.issue.number) }}"
 
           echo "git-ref=$gitRef" >> "$GITHUB_OUTPUT"
       - name: Compute artifacts names
         run: |
-          artifactName="argocd-image-${{ github.event.number || github.event.issue.number }}.txt"
+          artifactName="argocd-image-${{ needs.load-artifact.outputs.pr-number || github.event.issue.number }}.txt"
           echo "artifactName=$artifactName" >> "$GITHUB_ENV"
       - name: Write artifacts
-        if: ${{ inputs.argocd-image }}
+        if: ${{ needs.load-artifact.outputs.image-name }}
         run: |
-          echo "${{ inputs.argocd-image }}" > ${{ env.artifactName }}
+          echo "${{ needs.load-artifact.outputs.image-name }}" > ${{ env.artifactName }}
       - name: Upload artifacts
-        if: ${{ inputs.argocd-image }}
+        if: ${{ needs.load-artifact.outputs.image-name }}
         uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce #v3.1.2
         with:
           name: ${{ env.artifactName }}
@@ -67,10 +118,10 @@ jobs:
         run: |
           echo "BNS_GIT_SHA=`git rev-parse --short HEAD`" >> "$GITHUB_ENV"
 
-          echo "BNS_BUNNYSHELL_YAML_PATH=${{ inputs.bunnyshell-yaml-path || '.bunnyshell/templates/preview/bunnyshell.yaml' }}" >> "$GITHUB_ENV"
+          echo "BNS_BUNNYSHELL_YAML_PATH=${{ '.bunnyshell/templates/preview/bunnyshell.yaml' }}" >> "$GITHUB_ENV"
 
           artifactArgocdImage=""
-          if [ "${{ inputs.argocd-image }}" == "" ]; then
+          if [ "${{ needs.load-artifact.outputs.image-name }}" == "" ]; then
 
             # this will also exit if no artifact was created before
             gh run download -n ${{ env.artifactName }}
@@ -79,13 +130,13 @@ jobs:
 
             # exit if artifact is empty, cannot continue
             if [ "$artifactArgocdImage" == "" ]; then
-              echo "No argocd-image to use, neither in inputs nor in artifacts."
+              echo "No argocd-image to use."
               exit 1
             fi
 
             echo "BNS_ARGOCD_IMAGE=$artifactArgocdImage" >> "$GITHUB_ENV"
           else
-            echo "BNS_ARGOCD_IMAGE=${{ inputs.argocd-image }}" >> "$GITHUB_ENV"
+            echo "BNS_ARGOCD_IMAGE=${{ needs.load-artifact.outputs.image-name }}" >> "$GITHUB_ENV"
           fi
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -114,8 +165,8 @@ jobs:
       pull-requests: write
     name: Deploy Environment
     needs: prepare
-    if: ${{ github.event_name == 'issue_comment' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'bns:preview')) }}
-    uses: bunnyshell/workflows/.github/workflows/deploy-env.yaml@840efd407ae0c37f11d60f7d6a8a505eed4386a0 #todo bns: fix to a gitSha
+    if: ${{ github.event_name == 'issue_comment' || (github.event_name == 'pull_request' }} #todo bns: fix also with labels && contains(github.event.pull_request.labels.*.name, 'bns:preview')) }}
+    uses: bunnyshell/workflows/.github/workflows/prepare-and-deploy-env.yaml@f7f9ad94030d3e5c69c72f2d480bd360acb5545c # v1.0.3 #todo bns: fix to a gitSha
     with:
       project-id: ${{ vars.BUNNYSHELL_PROJECT_ID }}
       cluster-id: ${{ vars.BUNNYSHELL_CLUSTER_ID }}
