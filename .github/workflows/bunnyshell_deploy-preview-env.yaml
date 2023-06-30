@@ -165,7 +165,7 @@ jobs:
       pull-requests: write
     name: Deploy Environment
     needs: prepare
-    if: ${{ github.event_name == 'issue_comment' || (github.event_name == 'pull_request' }} #todo bns: fix also with labels && contains(github.event.pull_request.labels.*.name, 'bns:preview')) }}
+    if: ${{ github.event_name == 'issue_comment' || (github.event_name == 'pull_request') }} #todo bns: fix also with labels && contains(github.event.pull_request.labels.*.name, 'bns:preview')) }}
     uses: bunnyshell/workflows/.github/workflows/prepare-and-deploy-env.yaml@f7f9ad94030d3e5c69c72f2d480bd360acb5545c # v1.0.3 #todo bns: fix to a gitSha
     with:
       project-id: ${{ vars.BUNNYSHELL_PROJECT_ID }}
