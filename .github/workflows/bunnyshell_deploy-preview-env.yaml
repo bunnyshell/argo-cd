@@ -104,7 +104,7 @@ jobs:
         run: |
           prNumber=${{ needs.load-artifact.outputs.pr-number || github.event.issue.number }}
           gitRef="refs/pull/$prNumber/head"
-          
+
           echo "PR_NUMBER=$prNumber" >> $GITHUB_ENV
           echo "GIT_REF=$gitRef" >> $GITHUB_ENV
       - name: Compute artifacts names
@@ -178,7 +178,7 @@ jobs:
       pull-requests: write
     name: Deploy Environment
     needs: prepare
-    if: ${{ github.event_name == 'issue_comment' || (github.event_name == 'workflow_run') }} #todo bns: fix also with labels && contains(github.event.pull_request.labels.*.name, 'bns:preview')) }}
+    if: ${{ always() && (github.event_name == 'issue_comment' || (github.event_name == 'workflow_run')) }} #todo bns: fix also with labels && contains(github.event.pull_request.labels.*.name, 'bns:preview')) }}
     uses: bunnyshell/workflows/.github/workflows/prepare-and-deploy-env.yaml@02c93566e977ac0918432f253e70a4a3b4893884 # v1.0.3 #todo bns: fix to a gitSha
     with:
       project-id: ${{ vars.BUNNYSHELL_PROJECT_ID }}
