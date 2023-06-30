@@ -102,8 +102,11 @@ jobs:
         uses: frenck/action-setup-yq@c4b5be8b4a215c536a41d436757d9feb92836d4f # v1.0.2
       - name: determine-pr-number
         run: |
-          echo "PR_NUMBER=${{ needs.load-artifact.outputs.pr-number || github.event.issue.number }}" >> $GITHUB_ENV
-          echo "GIT_REF=${{ format('refs/pull/{0}/head', env.PR_NUMBER) }}" >> $GITHUB_ENV
+          prNumber=${{ needs.load-artifact.outputs.pr-number || github.event.issue.number }}
+          gitRef="refs/pull/$prNumber/head"
+          
+          echo "PR_NUMBER=$prNumber" >> $GITHUB_ENV
+          echo "GIT_REF=$gitRef" >> $GITHUB_ENV
       - name: Compute artifacts names
         run: |
           artifactName="argocd-image-${{ needs.load-artifact.outputs.pr-number || github.event.issue.number }}.txt"
