@@ -3,10 +3,10 @@ name: Image
 on:
   push:
     branches:
-      - master
+      - master-bns #todo bns: rollback to master
   pull_request:
     branches:
-      - master
+      - master-bns #todo bns: rollback to master
     types: [ labeled, unlabeled, opened, synchronize, reopened ]
 
 concurrency:
