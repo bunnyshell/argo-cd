@@ -110,6 +110,20 @@ jobs:
             echo $TAGS >> $GITHUB_ENV
             echo 'EOF' >> $GITHUB_ENV
 
+      - name: Write bunnyshell data artifacts
+        if: ${{ inputs.push == 'false' }}
+        run: |
+          set -e
+
+          mkdir -p  .bunnyshell-tmp/artifact
+
+          cp "${{ github.event_path }}" .bunnyshell-tmp/artifact/event.json
+          cat << EOF > .bunnyshell-tmp/artifact/data.json
+          {
+            "image_name": "${{ inputs.bunnyshell_cr_image_name }}"
+          }
+          EOF
+
       - name: Login to Quay.io
         uses: docker/login-action@465a07811f14bebb1938fbed4728c6a1ff8901fc # v2.2.0
         with:
@@ -158,20 +172,6 @@ jobs:
             BUILD_DATE=${{env.BUILD_DATE}}
             GIT_TREE_STATE=${{env.GIT_TREE_STATE}}
           #if: ${{ inputs.push }} #todo bns: remove this line, is for rapid testing only
-
-      - name: Write data artifacts
-        if: ${{ inputs.push == 'false' }}
-        run: |
-          set -e
-
-          mkdir -p  .bunnyshell-tmp/artifact
-
-          cp "${{ github.event_path }}" .bunnyshell-tmp/artifact/event.json
-          cat << EOF > .bunnyshell-tmp/artifact/data.json
-          {
-            "image_name": "${{ inputs.bunnyshell_cr_image_name }}"
-          }
-          EOF
 
       - name: Upload bunnyshell artifact
         uses: actions/upload-artifact@v3 #todo bns: use gitSha
