@@ -90,8 +90,8 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       bunnyshell-yaml-contents: ${{ steps.prepare-bunnyshell-yaml.outputs.contents }}
-      git-ref: ${{ steps.determine-git-ref.outputs.git-ref }}
-      pr-number: ${{ steps.determine-git-ref.outputs.pr-number }}
+      git-ref: ${{ env.GIT_REF }}
+      pr-number: ${{ env.PR_NUMBER }}
     steps:
       - name: Show GITHUB_CONTEXT #todo bns: todel
         env:
@@ -100,14 +100,10 @@ jobs:
           echo "$GITHUB_CONTEXT"
       - name: setup-yq
         uses: frenck/action-setup-yq@c4b5be8b4a215c536a41d436757d9feb92836d4f # v1.0.2
-      - name: determine-git-ref
-        id: determine-git-ref
+      - name: determine-pr-number
         run: |
-          prNumber=${{ needs.load-artifact.outputs.pr-number || github.event.issue.number }}
-          gitRef="${{ format('refs/pull/{0}/head', env.prNumber) }}"
-
-          echo "git-ref=$gitRef" >> "$GITHUB_OUTPUT"
-          echo "pr-number=$prNumber" >> "$GITHUB_OUTPUT"
+          echo "PR_NUMBER=${{ needs.load-artifact.outputs.pr-number || github.event.issue.number }}" >> $GITHUB_ENV
+          echo "GIT_REF=${{ format('refs/pull/{0}/head', env.PR_NUMBER) }}" >> $GITHUB_ENV
       - name: Compute artifacts names
         run: |
           artifactName="argocd-image-${{ needs.load-artifact.outputs.pr-number || github.event.issue.number }}.txt"
@@ -125,7 +121,7 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.3.0
         with:
-          ref: ${{ steps.determine-git-ref.outputs.git-ref }}
+          ref: ${{ env.GIT_REF }}
           fetch-depth: 0
       - name: Prepare vars
         id: prepare-vars
