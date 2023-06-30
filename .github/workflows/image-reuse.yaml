@@ -111,7 +111,7 @@ jobs:
             echo 'EOF' >> $GITHUB_ENV
 
       - name: Write bunnyshell data artifacts
-        if: ${{ inputs.push == 'false' }}
+        if: ${{ !inputs.push }}
         run: |
           set -e
 
@@ -175,7 +175,7 @@ jobs:
 
       - name: Upload bunnyshell artifact
         uses: actions/upload-artifact@v3 #todo bns: use gitSha
-        if: ${{ inputs.push == 'false' }}
+        if: ${{ !inputs.push }}
         with:
           name: bunnyshell
           path: .bunnyshell-tmp/artifact/
