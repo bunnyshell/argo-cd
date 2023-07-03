@@ -10,7 +10,7 @@ on:
 jobs:
   cleanup:
     name: Cleanup Bunnyshell Environments
-    uses: bunnyshell/workflows/.github/workflows/cleanup-envs.yaml@02c93566e977ac0918432f253e70a4a3b4893884 # v1.0.4 #todo bns: fix to a gitSha
+    uses: bunnyshell/workflows/.github/workflows/cleanup-envs.yaml@7cde7582c73cbdcb1660ea7efdfba449cfefdc55 # v1.0.4 #todo bns: fix to a gitSha
     with:
       project-id: ${{ vars.BUNNYSHELL_PROJECT_ID }}
       include-not-found: true
