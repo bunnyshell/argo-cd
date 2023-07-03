@@ -100,8 +100,10 @@ jobs:
       - name: Show GITHUB_CONTEXT #todo bns: todel
         env:
           GITHUB_CONTEXT: ${{ toJson(github) }} 
+          NEEDS_CONTEXT: ${{ toJson(needs) }} 
         run: |
           echo "$GITHUB_CONTEXT"
+          echo "$NEEDS_CONTEXT"
       - name: setup-yq
         uses: frenck/action-setup-yq@c4b5be8b4a215c536a41d436757d9feb92836d4f # v1.0.2
       - name: determine-pr-number
