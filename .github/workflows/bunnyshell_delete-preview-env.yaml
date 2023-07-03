@@ -15,7 +15,7 @@ jobs:
     permissions:
       pull-requests: write
     name: Delete Environment
-    uses: bunnyshell/workflows/.github/workflows/delete-env.yaml@7cde7582c73cbdcb1660ea7efdfba449cfefdc55 # v1.0.4 #todo bns: fix to a gitSha
+    uses: bunnyshell/workflows/.github/workflows/delete-env.yaml@8203575c6c8c283fd70c725c2f877e846f1b1973 # v1.0.4 #todo bns: fix to a gitSha
     with:
       project-id: ${{ vars.BUNNYSHELL_PROJECT_ID }}
       env-name: 'ArgoCD PR #${{ github.event.number || github.event.issue.number }}'
