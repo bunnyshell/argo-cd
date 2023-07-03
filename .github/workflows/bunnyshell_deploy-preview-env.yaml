@@ -189,7 +189,7 @@ jobs:
     with:
       project-id: ${{ vars.BUNNYSHELL_PROJECT_ID }}
       cluster-id: ${{ vars.BUNNYSHELL_CLUSTER_ID }}
-      env-name: 'ArgoCD PR #${{ github.event.number || github.event.issue.number }}'
+      env-name: 'ArgoCD PR #${{ needs.prepare.outputs.pr-number || github.event.issue.number }}'
       bunnyshell-yaml-contents: ${{ needs.prepare.outputs.bunnyshell-yaml-contents }}
       allowed-users: ${{ vars.BUNNYSHELL_ALLOWED_USERS }}
       comment-on-pr: true
