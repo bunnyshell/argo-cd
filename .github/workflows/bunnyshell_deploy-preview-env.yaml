@@ -65,7 +65,7 @@ jobs:
         run: |
           echo "PR_NUMBER=${{ fromJSON(env.EVENT_JSON).number }}" >> $GITHUB_ENV
           echo "IMAGE_NAME=${{ fromJSON(env.DATA_JSON).image_name }}" >> $GITHUB_ENV
-          echo "PR_HAS_PREVIEW_LABELS=${{ contains(env.EVENT_JSON.pull_request.labels.*.name, 'bns:preview') }}" >> $GITHUB_ENV
+          echo "PR_HAS_PREVIEW_LABELS=${{ contains(fromJSON(env.EVENT_JSON).pull_request.labels.*.name, 'bns:preview') }}" >> $GITHUB_ENV
 
       - name: Configure Bunnyshell AWS Credentials
         uses: aws-actions/configure-aws-credentials@5fd3084fc36e372ff1fff382a39b10d03659f355 # v2.2.0
