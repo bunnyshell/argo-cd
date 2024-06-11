@@ -27,7 +27,7 @@ func Test_setHelmOpt(t *testing.T) {
 	t.Run("IgnoreMissingValueFiles", func(t *testing.T) {
 		src := v1alpha1.ApplicationSource{}
 		setHelmOpt(&src, helmOpts{ignoreMissingValueFiles: true})
-		assert.Equal(t, true, src.Helm.IgnoreMissingValueFiles)
+		assert.True(t, src.Helm.IgnoreMissingValueFiles)
 	})
 	t.Run("ReleaseName", func(t *testing.T) {
 		src := v1alpha1.ApplicationSource{}
@@ -57,12 +57,12 @@ func Test_setHelmOpt(t *testing.T) {
 	t.Run("HelmPassCredentials", func(t *testing.T) {
 		src := v1alpha1.ApplicationSource{}
 		setHelmOpt(&src, helmOpts{passCredentials: true})
-		assert.Equal(t, true, src.Helm.PassCredentials)
+		assert.True(t, src.Helm.PassCredentials)
 	})
 	t.Run("HelmSkipCrds", func(t *testing.T) {
 		src := v1alpha1.ApplicationSource{}
 		setHelmOpt(&src, helmOpts{skipCrds: true})
-		assert.Equal(t, true, src.Helm.SkipCrds)
+		assert.True(t, src.Helm.SkipCrds)
 	})
 }
 
@@ -123,6 +123,11 @@ func Test_setKustomizeOpt(t *testing.T) {
 		setKustomizeOpt(&src, kustomizeOpts{commonAnnotations: map[string]string{"foo1": "bar1", "foo2": "bar2"}})
 		assert.Equal(t, &v1alpha1.ApplicationSourceKustomize{CommonAnnotations: map[string]string{"foo1": "bar1", "foo2": "bar2"}}, src.Kustomize)
 	})
+	t.Run("Label Without Selector", func(t *testing.T) {
+		src := v1alpha1.ApplicationSource{}
+		setKustomizeOpt(&src, kustomizeOpts{commonLabels: map[string]string{"foo1": "bar1", "foo2": "bar2"}, labelWithoutSelector: true})
+		assert.Equal(t, &v1alpha1.ApplicationSourceKustomize{CommonLabels: map[string]string{"foo1": "bar1", "foo2": "bar2"}, LabelWithoutSelector: true}, src.Kustomize)
+	})
 }
 
 func Test_setJsonnetOpt(t *testing.T) {
@@ -165,7 +170,16 @@ func (f *appOptionsFixture) SetFlag(key, value string) error {
 	if err != nil {
 		return err
 	}
-	_ = SetAppSpecOptions(f.command.Flags(), f.spec, f.options)
+	_ = SetAppSpecOptions(f.command.Flags(), f.spec, f.options, 0)
+	return err
+}
+
+func (f *appOptionsFixture) SetFlagWithSourcePosition(key, value string, sourcePosition int) error {
+	err := f.command.Flags().Set(key, value)
+	if err != nil {
+		return err
+	}
+	_ = SetAppSpecOptions(f.command.Flags(), f.spec, f.options, sourcePosition)
 	return err
 }
 
@@ -216,7 +230,55 @@ func Test_setAppSpecOptions(t *testing.T) {
 	t.Run("Kustomize", func(t *testing.T) {
 		assert.NoError(t, f.SetFlag("kustomize-replica", "my-deployment=2"))
 		assert.NoError(t, f.SetFlag("kustomize-replica", "my-statefulset=4"))
-		assert.Equal(t, f.spec.Source.Kustomize.Replicas, v1alpha1.KustomizeReplicas{{Name: "my-deployment", Count: intstr.FromInt(2)}, {Name: "my-statefulset", Count: intstr.FromInt(4)}})
+		assert.Equal(t, v1alpha1.KustomizeReplicas{{Name: "my-deployment", Count: intstr.FromInt(2)}, {Name: "my-statefulset", Count: intstr.FromInt(4)}}, f.spec.Source.Kustomize.Replicas)
+	})
+}
+
+func newMultiSourceAppOptionsFixture() *appOptionsFixture {
+	fixture := &appOptionsFixture{
+		spec: &v1alpha1.ApplicationSpec{
+			Sources: v1alpha1.ApplicationSources{
+				v1alpha1.ApplicationSource{},
+				v1alpha1.ApplicationSource{},
+			},
+		},
+		command: &cobra.Command{},
+		options: &AppOptions{},
+	}
+	AddAppFlags(fixture.command, fixture.options)
+	return fixture
+}
+
+func Test_setAppSpecOptionsMultiSourceApp(t *testing.T) {
+	f := newMultiSourceAppOptionsFixture()
+	sourcePosition := 0
+	sourcePosition1 := 1
+	sourcePosition2 := 2
+	t.Run("SyncPolicy", func(t *testing.T) {
+		assert.NoError(t, f.SetFlagWithSourcePosition("sync-policy", "automated", sourcePosition1))
+		assert.NotNil(t, f.spec.SyncPolicy.Automated)
+
+		f.spec.SyncPolicy = nil
+		assert.NoError(t, f.SetFlagWithSourcePosition("sync-policy", "automatic", sourcePosition1))
+		assert.NotNil(t, f.spec.SyncPolicy.Automated)
+	})
+	t.Run("Helm - SourcePosition 0", func(t *testing.T) {
+		assert.NoError(t, f.SetFlagWithSourcePosition("helm-version", "v2", sourcePosition))
+		assert.Len(t, f.spec.GetSources(), 2)
+		assert.Equal(t, "v2", f.spec.GetSources()[sourcePosition].Helm.Version)
+	})
+	t.Run("Kustomize", func(t *testing.T) {
+		assert.NoError(t, f.SetFlagWithSourcePosition("kustomize-replica", "my-deployment=2", sourcePosition1))
+		assert.Equal(t, v1alpha1.KustomizeReplicas{{Name: "my-deployment", Count: intstr.FromInt(2)}}, f.spec.Sources[sourcePosition1-1].Kustomize.Replicas)
+		assert.NoError(t, f.SetFlagWithSourcePosition("kustomize-replica", "my-deployment=4", sourcePosition2))
+		assert.Equal(t, v1alpha1.KustomizeReplicas{{Name: "my-deployment", Count: intstr.FromInt(4)}}, f.spec.Sources[sourcePosition2-1].Kustomize.Replicas)
+	})
+	t.Run("Helm", func(t *testing.T) {
+		assert.NoError(t, f.SetFlagWithSourcePosition("helm-version", "v2", sourcePosition1))
+		assert.NoError(t, f.SetFlagWithSourcePosition("helm-version", "v3", sourcePosition2))
+		assert.Len(t, f.spec.GetSources(), 2)
+		assert.Equal(t, "v2", f.spec.GetSources()[sourcePosition1-1].Helm.Version)
+		assert.Equal(t, "v3", f.spec.GetSources()[sourcePosition2-1].Helm.Version)
 	})
 }
 
@@ -296,7 +358,7 @@ func TestReadAppsFromURI(t *testing.T) {
 	apps := make([]*v1alpha1.Application, 0)
 	err = readAppsFromURI(file.Name(), &apps)
 	assert.NoError(t, err)
-	assert.Equal(t, 2, len(apps))
+	assert.Len(t, apps, 2)
 
 	assert.Equal(t, "sth1", apps[0].Name)
 	assert.Equal(t, "sth2", apps[1].Name)
@@ -327,7 +389,7 @@ func TestConstructAppFromStdin(t *testing.T) {
 		log.Fatal(err)
 	}
 	assert.NoError(t, err)
-	assert.Equal(t, 2, len(apps))
+	assert.Len(t, apps, 2)
 	assert.Equal(t, "sth1", apps[0].Name)
 	assert.Equal(t, "sth2", apps[1].Name)
 
@@ -337,7 +399,7 @@ func TestConstructBasedOnName(t *testing.T) {
 	apps, err := ConstructApps("", "test", []string{}, []string{}, []string{}, AppOptions{}, nil)
 
 	assert.NoError(t, err)
-	assert.Equal(t, 1, len(apps))
+	assert.Len(t, apps, 1)
 	assert.Equal(t, "test", apps[0].Name)
 }
 

@@ -34,7 +34,7 @@ func TestGitLabServiceCustomBaseURL(t *testing.T) {
 		writeMRListResponse(t, w)
 	})
 
-	svc, err := NewGitLabService(context.Background(), "", server.URL, "278964", nil, "")
+	svc, err := NewGitLabService(context.Background(), "", server.URL, "278964", nil, "", "", false)
 	assert.NoError(t, err)
 
 	_, err = svc.List(context.Background())
@@ -53,7 +53,7 @@ func TestGitLabServiceToken(t *testing.T) {
 		writeMRListResponse(t, w)
 	})
 
-	svc, err := NewGitLabService(context.Background(), "token-123", server.URL, "278964", nil, "")
+	svc, err := NewGitLabService(context.Background(), "token-123", server.URL, "278964", nil, "", "", false)
 	assert.NoError(t, err)
 
 	_, err = svc.List(context.Background())
@@ -72,16 +72,16 @@ func TestList(t *testing.T) {
 		writeMRListResponse(t, w)
 	})
 
-	svc, err := NewGitLabService(context.Background(), "", server.URL, "278964", []string{}, "")
+	svc, err := NewGitLabService(context.Background(), "", server.URL, "278964", []string{}, "", "", false)
 	assert.NoError(t, err)
 
 	prs, err := svc.List(context.Background())
 	assert.NoError(t, err)
 	assert.Len(t, prs, 1)
-	assert.Equal(t, prs[0].Number, 15442)
-	assert.Equal(t, prs[0].Branch, "use-structured-logging-for-db-load-balancer")
-	assert.Equal(t, prs[0].TargetBranch, "master")
-	assert.Equal(t, prs[0].HeadSHA, "2fc4e8b972ff3208ec63b6143e34ad67ff343ad7")
+	assert.Equal(t, 15442, prs[0].Number)
+	assert.Equal(t, "use-structured-logging-for-db-load-balancer", prs[0].Branch)
+	assert.Equal(t, "master", prs[0].TargetBranch)
+	assert.Equal(t, "2fc4e8b972ff3208ec63b6143e34ad67ff343ad7", prs[0].HeadSHA)
 }
 
 func TestListWithLabels(t *testing.T) {
@@ -96,7 +96,7 @@ func TestListWithLabels(t *testing.T) {
 		writeMRListResponse(t, w)
 	})
 
-	svc, err := NewGitLabService(context.Background(), "", server.URL, "278964", []string{"feature", "ready"}, "")
+	svc, err := NewGitLabService(context.Background(), "", server.URL, "278964", []string{"feature", "ready"}, "", "", false)
 	assert.NoError(t, err)
 
 	_, err = svc.List(context.Background())
@@ -115,7 +115,7 @@ func TestListWithState(t *testing.T) {
 		writeMRListResponse(t, w)
 	})
 
-	svc, err := NewGitLabService(context.Background(), "", server.URL, "278964", []string{}, "opened")
+	svc, err := NewGitLabService(context.Background(), "", server.URL, "278964", []string{}, "opened", "", false)
 	assert.NoError(t, err)
 
 	_, err = svc.List(context.Background())

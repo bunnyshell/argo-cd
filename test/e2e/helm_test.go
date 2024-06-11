@@ -135,13 +135,13 @@ func TestHelmIgnoreMissingValueFiles(t *testing.T) {
 		Then().
 		And(func(app *Application) {
 			assert.Equal(t, []string{"does-not-exist-values.yaml"}, app.Spec.GetSource().Helm.ValueFiles)
-			assert.Equal(t, false, app.Spec.GetSource().Helm.IgnoreMissingValueFiles)
+			assert.False(t, app.Spec.GetSource().Helm.IgnoreMissingValueFiles)
 		}).
 		When().
 		AppSet("--ignore-missing-value-files").
 		Then().
 		And(func(app *Application) {
-			assert.Equal(t, true, app.Spec.GetSource().Helm.IgnoreMissingValueFiles)
+			assert.True(t, app.Spec.GetSource().Helm.IgnoreMissingValueFiles)
 		}).
 		When().
 		Sync().
@@ -153,7 +153,7 @@ func TestHelmIgnoreMissingValueFiles(t *testing.T) {
 		AppUnSet("--ignore-missing-value-files").
 		Then().
 		And(func(app *Application) {
-			assert.Equal(t, false, app.Spec.GetSource().Helm.IgnoreMissingValueFiles)
+			assert.False(t, app.Spec.GetSource().Helm.IgnoreMissingValueFiles)
 		}).
 		When().
 		IgnoreErrors().
@@ -401,7 +401,7 @@ func TestHelmWithMultipleDependencies(t *testing.T) {
 		Expect(SyncStatusIs(SyncStatusCodeSynced))
 }
 
-func TestHelmWithMultipleDependenciesPermissionDenied(t *testing.T) {
+func TestHelmDependenciesPermissionDenied(t *testing.T) {
 	SkipOnEnv(t, "HELM")
 
 	projName := "argo-helm-project-denied"
@@ -426,10 +426,10 @@ func TestHelmWithMultipleDependenciesPermissionDenied(t *testing.T) {
 		Then().
 		Expect(Error("", expectedErr))
 
-	expectedErr = fmt.Sprintf("helm repos https://localhost:9444/argo-e2e/testdata.git/helm-repo/local, https://localhost:9444/argo-e2e/testdata.git/helm-repo/local2 are not permitted in project '%s'", projName)
+	expectedErr = fmt.Sprintf("helm repos https://localhost:9443/argo-e2e/testdata.git/helm-repo/local, https://localhost:9443/argo-e2e/testdata.git/helm-repo/local2 are not permitted in project '%s'", projName)
 	GivenWithSameState(t).
 		Project(projName).
-		Path("helm-with-multiple-dependencies").
+		Path("helm-with-multiple-dependencies-permission-denied").
 		CustomCACertAdded().
 		HelmHTTPSCredentialsUserPassAdded().
 		HelmPassCredentials().

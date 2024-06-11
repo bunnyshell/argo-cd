@@ -14,7 +14,6 @@ import (
 	"github.com/argoproj/argo-cd/v2/cmd/argocd/commands/headless"
 	"github.com/argoproj/argo-cd/v2/pkg/apiclient/account"
 	"github.com/argoproj/argo-cd/v2/pkg/apiclient/session"
-	"github.com/argoproj/argo-cd/v2/test/e2e/fixture"
 	. "github.com/argoproj/argo-cd/v2/test/e2e/fixture"
 	accountFixture "github.com/argoproj/argo-cd/v2/test/e2e/fixture/account"
 	"github.com/argoproj/argo-cd/v2/util/io"
@@ -29,13 +28,13 @@ func TestCreateAndUseAccount(t *testing.T) {
 		Then().
 		And(func(account *account.Account, err error) {
 			assert.Equal(t, account.Name, ctx.GetName())
-			assert.Equal(t, account.Capabilities, []string{"login"})
+			assert.Equal(t, []string{"login"}, account.Capabilities)
 		}).
 		When().
 		Login().
 		Then().
 		CurrentUser(func(user *session.GetUserInfoResponse, err error) {
-			assert.Equal(t, user.LoggedIn, true)
+			assert.True(t, user.LoggedIn)
 			assert.Equal(t, user.Username, ctx.GetName())
 		})
 }
@@ -77,7 +76,7 @@ func TestCanIGetLogsAllowSwitchOn(t *testing.T) {
 		When().
 		Create().
 		Login().
-		SetPermissions([]fixture.ACL{
+		SetPermissions([]ACL{
 			{
 				Resource: "logs",
 				Action:   "get",
@@ -145,7 +144,7 @@ test   true     login, apiKey`, output)
 	info, err := client.GetUserInfo(context.Background(), &session.GetUserInfoRequest{})
 	assert.NoError(t, err)
 
-	assert.Equal(t, info.Username, "test")
+	assert.Equal(t, "test", info.Username)
 }
 
 func TestLoginBadCredentials(t *testing.T) {

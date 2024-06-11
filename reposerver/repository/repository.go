@@ -16,16 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/protobuf/ptypes/empty"
-
-	kubeyaml "k8s.io/apimachinery/pkg/util/yaml"
-
-	"k8s.io/apimachinery/pkg/api/resource"
-
-	"github.com/argoproj/argo-cd/v2/common"
-	"github.com/argoproj/argo-cd/v2/util/io/files"
-	"github.com/argoproj/argo-cd/v2/util/manifeststream"
-
 	"github.com/Masterminds/semver/v3"
 	"github.com/TomOnTime/utfutil"
 	"github.com/argoproj/gitops-engine/pkg/utils/kube"
@@ -33,6 +23,7 @@ import (
 	"github.com/argoproj/pkg/sync"
 	jsonpatch "github.com/evanphx/json-patch"
 	gogit "github.com/go-git/go-git/v5"
+	"github.com/golang/protobuf/ptypes/empty"
 	"github.com/google/go-jsonnet"
 	"github.com/google/uuid"
 	grpc_retry "github.com/grpc-ecosystem/go-grpc-middleware/retry"
@@ -40,28 +31,35 @@ import (
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	kubeyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
 
 	pluginclient "github.com/argoproj/argo-cd/v2/cmpserver/apiclient"
+	"github.com/argoproj/argo-cd/v2/common"
 	"github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v2/reposerver/apiclient"
 	"github.com/argoproj/argo-cd/v2/reposerver/cache"
 	"github.com/argoproj/argo-cd/v2/reposerver/metrics"
 	"github.com/argoproj/argo-cd/v2/util/app/discovery"
+	apppathutil "github.com/argoproj/argo-cd/v2/util/app/path"
 	argopath "github.com/argoproj/argo-cd/v2/util/app/path"
 	"github.com/argoproj/argo-cd/v2/util/argo"
 	"github.com/argoproj/argo-cd/v2/util/cmp"
+	"github.com/argoproj/argo-cd/v2/util/env"
 	"github.com/argoproj/argo-cd/v2/util/git"
 	"github.com/argoproj/argo-cd/v2/util/glob"
 	"github.com/argoproj/argo-cd/v2/util/gpg"
 	"github.com/argoproj/argo-cd/v2/util/grpc"
 	"github.com/argoproj/argo-cd/v2/util/helm"
 	"github.com/argoproj/argo-cd/v2/util/io"
+	"github.com/argoproj/argo-cd/v2/util/io/files"
 	pathutil "github.com/argoproj/argo-cd/v2/util/io/path"
 	"github.com/argoproj/argo-cd/v2/util/kustomize"
+	"github.com/argoproj/argo-cd/v2/util/manifeststream"
 	"github.com/argoproj/argo-cd/v2/util/text"
 )
 
@@ -74,7 +72,12 @@ const (
 	ociPrefix                      = "oci://"
 )
 
-var ErrExceededMaxCombinedManifestFileSize = errors.New("exceeded max combined manifest file size")
+var (
+	ErrExceededMaxCombinedManifestFileSize = errors.New("exceeded max combined manifest file size")
+	// helmConcurrencyDefault if true then helm concurrent manifest generation is enabled
+	// TODO: remove env variable and usage of .argocd-allow-concurrency once we are sure that it is safe to enable it by default
+	helmConcurrencyDefault = env.ParseBoolFromEnv("ARGOCD_HELM_ALLOW_CONCURRENCY", false)
+)
 
 // Service implements ManifestService interface
 type Service struct {
@@ -106,6 +109,10 @@ type RepoServerInitConstants struct {
 	AllowOutOfBoundsSymlinks                     bool
 	StreamedManifestMaxExtractedSize             int64
 	StreamedManifestMaxTarSize                   int64
+	HelmManifestMaxExtractedSize                 int64
+	HelmRegistryMaxIndexSize                     int64
+	DisableHelmManifestMaxExtractedSize          bool
+	IncludeHiddenDirectories                     bool
 }
 
 // NewService returns a new instance of the Manifest service
@@ -199,7 +206,7 @@ func (s *Service) ListRefs(ctx context.Context, q *apiclient.ListRefsRequest) (*
 func (s *Service) ListApps(ctx context.Context, q *apiclient.ListAppsRequest) (*apiclient.AppList, error) {
 	gitClient, commitSHA, err := s.newClientResolveRevision(q.Repo, q.Revision)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error setting up git client and resolving given revision: %w", err)
 	}
 	if apps, err := s.cache.ListApps(q.Repo.Repo, commitSHA); err == nil {
 		log.Infof("cache hit: %s/%s", q.Repo.Repo, q.Revision)
@@ -214,13 +221,13 @@ func (s *Service) ListApps(ctx context.Context, q *apiclient.ListAppsRequest) (*
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error acquiring repository lock: %w", err)
 	}
 
 	defer io.Close(closer)
-	apps, err := discovery.Discover(ctx, gitClient.Root(), gitClient.Root(), q.EnabledSourceTypes, s.initConstants.CMPTarExcludedGlobs)
+	apps, err := discovery.Discover(ctx, gitClient.Root(), gitClient.Root(), q.EnabledSourceTypes, s.initConstants.CMPTarExcludedGlobs, []string{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error discovering applications: %w", err)
 	}
 	err = s.cache.SetApps(q.Repo.Repo, commitSHA, apps)
 	if err != nil {
@@ -298,6 +305,7 @@ func (s *Service) runRepoOperation(
 	var gitClient git.Client
 	var helmClient helm.Client
 	var err error
+	gitClientOpts := git.WithCache(s.cache, !settings.noRevisionCache && !settings.noCache)
 	revision = textutils.FirstNonEmpty(revision, source.TargetRevision)
 	unresolvedRevision := revision
 	if source.IsHelm() {
@@ -306,13 +314,13 @@ func (s *Service) runRepoOperation(
 			return err
 		}
 	} else {
-		gitClient, revision, err = s.newClientResolveRevision(repo, revision, git.WithCache(s.cache, !settings.noRevisionCache && !settings.noCache))
+		gitClient, revision, err = s.newClientResolveRevision(repo, revision, gitClientOpts)
 		if err != nil {
 			return err
 		}
 	}
 
-	repoRefs, err := resolveReferencedSources(hasMultipleSources, source.Helm, refSources, s.newClientResolveRevision)
+	repoRefs, err := resolveReferencedSources(hasMultipleSources, source.Helm, refSources, s.newClientResolveRevision, gitClientOpts)
 	if err != nil {
 		return err
 	}
@@ -336,7 +344,7 @@ func (s *Service) runRepoOperation(
 
 	if source.IsHelm() {
 		if settings.noCache {
-			err = helmClient.CleanChartCache(source.Chart, revision)
+			err = helmClient.CleanChartCache(source.Chart, revision, repo.Project)
 			if err != nil {
 				return err
 			}
@@ -345,7 +353,7 @@ func (s *Service) runRepoOperation(
 		if source.Helm != nil {
 			helmPassCredentials = source.Helm.PassCredentials
 		}
-		chartPath, closer, err := helmClient.ExtractChart(source.Chart, revision, helmPassCredentials)
+		chartPath, closer, err := helmClient.ExtractChart(source.Chart, revision, repo.Project, helmPassCredentials, s.initConstants.HelmManifestMaxExtractedSize, s.initConstants.DisableHelmManifestMaxExtractedSize)
 		if err != nil {
 			return err
 		}
@@ -399,9 +407,15 @@ func (s *Service) runRepoOperation(
 			}
 		}
 
-		commitSHA, err := gitClient.CommitSHA()
-		if err != nil {
-			return err
+		var commitSHA string
+		if hasMultipleSources {
+			commitSHA = revision
+		} else {
+			commit, err := gitClient.CommitSHA()
+			if err != nil {
+				return fmt.Errorf("failed to get commit SHA: %w", err)
+			}
+			commitSHA = commit
 		}
 
 		// double-check locking
@@ -455,7 +469,7 @@ type gitClientGetter func(repo *v1alpha1.Repository, revision string, opts ...gi
 //
 // Much of this logic is duplicated in runManifestGenAsync. If making changes here, check whether runManifestGenAsync
 // should be updated.
-func resolveReferencedSources(hasMultipleSources bool, source *v1alpha1.ApplicationSourceHelm, refSources map[string]*v1alpha1.RefTarget, newClientResolveRevision gitClientGetter) (map[string]string, error) {
+func resolveReferencedSources(hasMultipleSources bool, source *v1alpha1.ApplicationSourceHelm, refSources map[string]*v1alpha1.RefTarget, newClientResolveRevision gitClientGetter, gitClientOpts git.ClientOpts) (map[string]string, error) {
 	repoRefs := make(map[string]string)
 	if !hasMultipleSources || source == nil {
 		return repoRefs, nil
@@ -482,7 +496,7 @@ func resolveReferencedSources(hasMultipleSources bool, source *v1alpha1.Applicat
 			normalizedRepoURL := git.NormalizeGitURL(refSourceMapping.Repo.Repo)
 			_, ok = repoRefs[normalizedRepoURL]
 			if !ok {
-				_, referencedCommitSHA, err := newClientResolveRevision(&refSourceMapping.Repo, refSourceMapping.TargetRevision)
+				_, referencedCommitSHA, err := newClientResolveRevision(&refSourceMapping.Repo, refSourceMapping.TargetRevision, gitClientOpts)
 				if err != nil {
 					log.Errorf("Failed to get git client for repo %s: %v", refSourceMapping.Repo.Repo, err)
 					return nil, fmt.Errorf("failed to get git client for repo %s", refSourceMapping.Repo.Repo)
@@ -498,6 +512,17 @@ func resolveReferencedSources(hasMultipleSources bool, source *v1alpha1.Applicat
 func (s *Service) GenerateManifest(ctx context.Context, q *apiclient.ManifestRequest) (*apiclient.ManifestResponse, error) {
 	var res *apiclient.ManifestResponse
 	var err error
+
+	// Skip this path for ref only sources
+	if q.HasMultipleSources && q.ApplicationSource.Path == "" && !q.ApplicationSource.IsHelm() && q.ApplicationSource.IsRef() {
+		log.Debugf("Skipping manifest generation for ref only source for application: %s and ref %s", q.AppName, q.ApplicationSource.Ref)
+		_, revision, err := s.newClientResolveRevision(q.Repo, q.Revision, git.WithCache(s.cache, !q.NoRevisionCache && !q.NoCache))
+		res = &apiclient.ManifestResponse{
+			Revision: revision,
+		}
+		return res, err
+	}
+
 	cacheFn := func(cacheKey string, refSourceCommitSHAs cache.ResolvedRevisions, firstInvocation bool) (bool, error) {
 		ok, resp, err := s.getManifestCacheEntry(cacheKey, q, refSourceCommitSHAs, firstInvocation)
 		res = resp
@@ -720,7 +745,7 @@ func (s *Service) runManifestGenAsync(ctx context.Context, repoRoot, commitSHA, 
 								return
 							}
 						} else {
-							gitClient, referencedCommitSHA, err := s.newClientResolveRevision(&refSourceMapping.Repo, refSourceMapping.TargetRevision)
+							gitClient, referencedCommitSHA, err := s.newClientResolveRevision(&refSourceMapping.Repo, refSourceMapping.TargetRevision, git.WithCache(s.cache, !q.NoRevisionCache && !q.NoCache))
 							if err != nil {
 								log.Errorf("Failed to get git client for repo %s: %v", refSourceMapping.Repo.Repo, err)
 								ch.errCh <- fmt.Errorf("failed to get git client for repo %s", refSourceMapping.Repo.Repo)
@@ -814,6 +839,7 @@ func (s *Service) runManifestGenAsync(ctx context.Context, repoRoot, commitSHA, 
 			innerRes.NumberOfConsecutiveFailures++
 			innerRes.MostRecentError = err.Error()
 			cacheErr = s.cache.SetManifests(cacheKey, appSourceCopy, q.RefSources, q, q.Namespace, q.TrackingMethod, q.AppLabelKey, q.AppName, innerRes, refSourceCommitSHAs)
+
 			if cacheErr != nil {
 				logCtx.Warnf("manifest cache set error %s: %v", appSourceCopy.String(), cacheErr)
 				ch.errCh <- cacheErr
@@ -943,7 +969,7 @@ func (s *Service) getManifestCacheEntry(cacheKey string, q *apiclient.ManifestRe
 func getHelmRepos(appPath string, repositories []*v1alpha1.Repository, helmRepoCreds []*v1alpha1.RepoCreds) ([]helm.HelmRepository, error) {
 	dependencies, err := getHelmDependencyRepos(appPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error retrieving helm dependency repos: %w", err)
 	}
 	reposByName := make(map[string]*v1alpha1.Repository)
 	reposByUrl := make(map[string]*v1alpha1.Repository)
@@ -956,11 +982,13 @@ func getHelmRepos(appPath string, repositories []*v1alpha1.Repository, helmRepoC
 
 	repos := make([]helm.HelmRepository, 0)
 	for _, dep := range dependencies {
+		// find matching repo credentials by URL or name
 		repo, ok := reposByUrl[dep.Repo]
 		if !ok && dep.Name != "" {
 			repo, ok = reposByName[dep.Name]
 		}
 		if !ok {
+			// if no matching repo credentials found, use the repo creds from the credential list
 			repo = &v1alpha1.Repository{Repo: dep.Repo, Name: dep.Name, EnableOCI: dep.EnableOCI}
 			if repositoryCredential := getRepoCredential(helmRepoCreds, dep.Repo); repositoryCredential != nil {
 				repo.EnableOCI = repositoryCredential.EnableOCI
@@ -969,6 +997,18 @@ func getHelmRepos(appPath string, repositories []*v1alpha1.Repository, helmRepoC
 				repo.SSHPrivateKey = repositoryCredential.SSHPrivateKey
 				repo.TLSClientCertData = repositoryCredential.TLSClientCertData
 				repo.TLSClientCertKey = repositoryCredential.TLSClientCertKey
+			} else if repo.EnableOCI {
+				// finally if repo is OCI and no credentials found, use the first OCI credential matching by hostname
+				// see https://github.com/argoproj/argo-cd/issues/14636
+				for _, cred := range repositories {
+					// if the repo is OCI, don't match the repository URL exactly, but only as a dependent repository prefix just like in the getRepoCredential function
+					// see https://github.com/argoproj/argo-cd/issues/12436
+					if _, err := url.Parse("oci://" + dep.Repo); err == nil && cred.EnableOCI && strings.HasPrefix(dep.Repo, cred.Repo) {
+						repo.Username = cred.Username
+						repo.Password = cred.Password
+						break
+					}
+				}
 			}
 		}
 		repos = append(repos, helm.HelmRepository{Name: repo.Name, Repo: repo.Repo, Creds: repo.GetHelmCreds(), EnableOci: repo.EnableOCI})
@@ -988,18 +1028,22 @@ func getHelmDependencyRepos(appPath string) ([]*v1alpha1.Repository, error) {
 	repos := make([]*v1alpha1.Repository, 0)
 	f, err := os.ReadFile(filepath.Join(appPath, "Chart.yaml"))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error reading helm chart from %s: %w", filepath.Join(appPath, "Chart.yaml"), err)
 	}
 
 	d := &dependencies{}
 	if err = yaml.Unmarshal(f, d); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error unmarshalling the helm chart while getting helm dependency repos: %w", err)
 	}
 
 	for _, r := range d.Dependencies {
 		if strings.HasPrefix(r.Repository, "@") {
 			repos = append(repos, &v1alpha1.Repository{
 				Name: r.Repository[1:],
+			})
+		} else if strings.HasPrefix(r.Repository, "alias:") {
+			repos = append(repos, &v1alpha1.Repository{
+				Name: strings.TrimPrefix(r.Repository, "alias:"),
 			})
 		} else if u, err := url.Parse(r.Repository); err == nil && (u.Scheme == "https" || u.Scheme == "oci") {
 			repo := &v1alpha1.Repository{
@@ -1036,9 +1080,9 @@ func runHelmBuild(appPath string, h helm.Helm) error {
 	manifestGenerateLock.Lock(appPath)
 	defer manifestGenerateLock.Unlock(appPath)
 
-	// the `helm dependency build` is potentially time consuming 1~2 seconds
-	// marker file is used to check if command already run to avoid running it again unnecessary
-	// file is removed when repository re-initialized (e.g. when another commit is processed)
+	// the `helm dependency build` is potentially a time-consuming 1~2 seconds,
+	// a marker file is used to check if command already run to avoid running it again unnecessarily
+	// the file is removed when repository is re-initialized (e.g. when another commit is processed)
 	markerFile := path.Join(appPath, helmDepUpMarkerFile)
 	_, err := os.Stat(markerFile)
 	if err == nil {
@@ -1049,7 +1093,7 @@ func runHelmBuild(appPath string, h helm.Helm) error {
 
 	err = h.DependencyBuild()
 	if err != nil {
-		return err
+		return fmt.Errorf("error building helm chart dependencies: %w", err)
 	}
 	return os.WriteFile(markerFile, []byte("marker"), 0644)
 }
@@ -1060,7 +1104,7 @@ func isSourcePermitted(url string, repos []string) bool {
 }
 
 func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclient.ManifestRequest, isLocal bool, gitRepoPaths io.TempPaths) ([]*unstructured.Unstructured, error) {
-	concurrencyAllowed := isConcurrencyAllowed(appPath)
+	concurrencyAllowed := helmConcurrencyDefault || isConcurrencyAllowed(appPath)
 	if !concurrencyAllowed {
 		manifestGenerateLock.Lock(appPath)
 		defer manifestGenerateLock.Unlock(appPath)
@@ -1095,7 +1139,7 @@ func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclie
 
 		resolvedValueFiles, err := getResolvedValueFiles(appPath, repoRoot, env, q.GetValuesFileSchemes(), appHelm.ValueFiles, q.RefSources, gitRepoPaths, appHelm.IgnoreMissingValueFiles)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("error resolving helm value files: %w", err)
 		}
 
 		templateOpts.Values = resolvedValueFiles
@@ -1103,7 +1147,7 @@ func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclie
 		if !appHelm.ValuesIsEmpty() {
 			rand, err := uuid.NewRandom()
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("error generating random filename for Helm values file: %w", err)
 			}
 			p := path.Join(os.TempDir(), rand.String())
 			defer func() {
@@ -1114,7 +1158,7 @@ func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclie
 			}()
 			err = os.WriteFile(p, appHelm.ValuesYAML(), 0644)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("error writing helm values file: %w", err)
 			}
 			templateOpts.Values = append(templateOpts.Values, pathutil.ResolvedFilePath(p))
 		}
@@ -1129,7 +1173,7 @@ func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclie
 		for _, p := range appHelm.FileParameters {
 			resolvedPath, _, err := pathutil.ResolveValueFilePathOrUrl(appPath, repoRoot, env.Envsubst(p.Path), q.GetValuesFileSchemes())
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("error resolving helm value file path: %w", err)
 			}
 			templateOpts.SetFile[p.Name] = resolvedPath
 		}
@@ -1153,31 +1197,18 @@ func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclie
 
 	helmRepos, err := getHelmRepos(appPath, q.Repos, q.HelmRepoCreds)
 	if err != nil {
-		return nil, err
-	}
-
-	var reposNotPermitted []string
-	// We do a sanity check here to give a nicer error message in case any of the Helm repositories are not permitted by
-	// the AppProject which the application is a part of
-	for _, repo := range helmRepos {
-		if !isSourcePermitted(repo.Repo, q.ProjectSourceRepos) {
-			reposNotPermitted = append(reposNotPermitted, repo.Repo)
-		}
-	}
-
-	if len(reposNotPermitted) > 0 {
-		return nil, status.Errorf(codes.PermissionDenied, "helm repos %s are not permitted in project '%s'", strings.Join(reposNotPermitted, ", "), q.ProjectName)
+		return nil, fmt.Errorf("error getting helm repos: %w", err)
 	}
 
 	h, err := helm.NewHelmApp(appPath, helmRepos, isLocal, version, proxy, passCredentials)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error initializing helm app object: %w", err)
 	}
 
 	defer h.Dispose()
 	err = h.Init()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error initializing helm app: %w", err)
 	}
 
 	out, err := h.Template(templateOpts)
@@ -1193,6 +1224,24 @@ func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclie
 		}
 
 		if err != nil {
+			var reposNotPermitted []string
+			// We do a sanity check here to give a nicer error message in case any of the Helm repositories are not permitted by
+			// the AppProject which the application is a part of
+			for _, repo := range helmRepos {
+				msg := err.Error()
+
+				chartCannotBeReached := strings.Contains(msg, "is not a valid chart repository or cannot be reached")
+				couldNotDownloadChart := strings.Contains(msg, "could not download")
+
+				if (chartCannotBeReached || couldNotDownloadChart) && !isSourcePermitted(repo.Repo, q.ProjectSourceRepos) {
+					reposNotPermitted = append(reposNotPermitted, repo.Repo)
+				}
+			}
+
+			if len(reposNotPermitted) > 0 {
+				return nil, status.Errorf(codes.PermissionDenied, "helm repos %s are not permitted in project '%s'", strings.Join(reposNotPermitted, ", "), q.ProjectName)
+			}
+
 			return nil, err
 		}
 
@@ -1223,15 +1272,15 @@ func getResolvedValueFiles(
 		referencedSource := getReferencedSource(rawValueFile, refSources)
 		if referencedSource != nil {
 			// If the $-prefixed path appears to reference another source, do env substitution _after_ resolving that source.
-			resolvedPath, err = getResolvedRefValueFile(rawValueFile, env, allowedValueFilesSchemas, referencedSource.Repo.Repo, gitRepoPaths)
+			resolvedPath, err = getResolvedRefValueFile(rawValueFile, env, allowedValueFilesSchemas, referencedSource.Repo.Repo, gitRepoPaths, referencedSource.Repo.Project)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("error resolving value file path: %w", err)
 			}
 		} else {
-			// This will resolve val to an absolute path (or an URL)
+			// This will resolve val to an absolute path (or a URL)
 			resolvedPath, isRemote, err = pathutil.ResolveValueFilePathOrUrl(appPath, repoRoot, env.Envsubst(rawValueFile), allowedValueFilesSchemas)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("error resolving value file path: %w", err)
 			}
 		}
 
@@ -1256,9 +1305,15 @@ func getResolvedRefValueFile(
 	allowedValueFilesSchemas []string,
 	refSourceRepo string,
 	gitRepoPaths io.TempPaths,
+	project string,
 ) (pathutil.ResolvedFilePath, error) {
 	pathStrings := strings.Split(rawValueFile, "/")
-	repoPath := gitRepoPaths.GetPathIfExists(git.NormalizeGitURL(refSourceRepo))
+
+	keyData, err := json.Marshal(map[string]string{"url": git.NormalizeGitURL(refSourceRepo), "project": project})
+	if err != nil {
+		return "", err
+	}
+	repoPath := gitRepoPaths.GetPathIfExists(string(keyData))
 	if repoPath == "" {
 		return "", fmt.Errorf("failed to find repo %q", refSourceRepo)
 	}
@@ -1268,7 +1323,7 @@ func getResolvedRefValueFile(
 	// Resolve the path relative to the referenced repo and block any attempt at traversal.
 	resolvedPath, _, err := pathutil.ResolveValueFilePathOrUrl(repoPath, repoPath, env.Envsubst(substitutedPath), allowedValueFilesSchemas)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error resolving value file path: %w", err)
 	}
 	return resolvedPath, nil
 }
@@ -1330,15 +1385,16 @@ func GenerateManifests(ctx context.Context, appPath, repoRoot, revision string, 
 
 	resourceTracking := argo.NewResourceTracking()
 
-	appSourceType, err := GetAppSourceType(ctx, q.ApplicationSource, appPath, repoRoot, q.AppName, q.EnabledSourceTypes, opt.cmpTarExcludedGlobs)
+	env := newEnv(q, revision)
+
+	appSourceType, err := GetAppSourceType(ctx, q.ApplicationSource, appPath, repoRoot, q.AppName, q.EnabledSourceTypes, opt.cmpTarExcludedGlobs, env.Environ())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error getting app source type: %w", err)
 	}
 	repoURL := ""
 	if q.Repo != nil {
 		repoURL = q.Repo.Repo
 	}
-	env := newEnv(q, revision)
 
 	switch appSourceType {
 	case v1alpha1.ApplicationSourceTypeHelm:
@@ -1348,7 +1404,7 @@ func GenerateManifests(ctx context.Context, appPath, repoRoot, revision string, 
 		if q.KustomizeOptions != nil {
 			kustomizeBinary = q.KustomizeOptions.BinaryPath
 		}
-		k := kustomize.NewKustomizeApp(appPath, q.Repo.GetGitCreds(gitCredsStore), repoURL, kustomizeBinary)
+		k := kustomize.NewKustomizeApp(repoRoot, appPath, q.Repo.GetGitCreds(gitCredsStore), repoURL, kustomizeBinary)
 		targetObjs, _, err = k.Build(q.ApplicationSource.Kustomize, q.KustomizeOptions, env)
 	case v1alpha1.ApplicationSourceTypePlugin:
 		pluginName := ""
@@ -1356,7 +1412,7 @@ func GenerateManifests(ctx context.Context, appPath, repoRoot, revision string, 
 			pluginName = q.ApplicationSource.Plugin.Name
 		}
 		// if pluginName is provided it has to be `<metadata.name>-<spec.version>` or just `<metadata.name>` if plugin version is empty
-		targetObjs, err = runConfigManagementPluginSidecars(ctx, appPath, repoRoot, pluginName, env, q, q.Repo.GetGitCreds(gitCredsStore), opt.cmpTarDoneCh, opt.cmpTarExcludedGlobs)
+		targetObjs, err = runConfigManagementPluginSidecars(ctx, appPath, repoRoot, pluginName, env, q, opt.cmpTarDoneCh, opt.cmpTarExcludedGlobs)
 		if err != nil {
 			err = fmt.Errorf("plugin sidecar failed. %s", err.Error())
 		}
@@ -1419,13 +1475,28 @@ func GenerateManifests(ctx context.Context, appPath, repoRoot, revision string, 
 }
 
 func newEnv(q *apiclient.ManifestRequest, revision string) *v1alpha1.Env {
+	shortRevision := revision
+	if len(shortRevision) > 7 {
+		shortRevision = shortRevision[:7]
+	}
 	return &v1alpha1.Env{
 		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_NAME", Value: q.AppName},
 		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_NAMESPACE", Value: q.Namespace},
 		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_REVISION", Value: revision},
+		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_REVISION_SHORT", Value: shortRevision},
 		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_SOURCE_REPO_URL", Value: q.Repo.Repo},
 		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_SOURCE_PATH", Value: q.ApplicationSource.Path},
 		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_SOURCE_TARGET_REVISION", Value: q.ApplicationSource.TargetRevision},
+	}
+}
+
+func newEnvRepoQuery(q *apiclient.RepoServerAppDetailsQuery, revision string) *v1alpha1.Env {
+	return &v1alpha1.Env{
+		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_NAME", Value: q.AppName},
+		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_REVISION", Value: revision},
+		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_SOURCE_REPO_URL", Value: q.Repo.Repo},
+		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_SOURCE_PATH", Value: q.Source.Path},
+		&v1alpha1.EnvEntry{Name: "ARGOCD_APP_SOURCE_TARGET_REVISION", Value: q.Source.TargetRevision},
 	}
 }
 
@@ -1488,7 +1559,7 @@ func mergeSourceParameters(source *v1alpha1.ApplicationSource, path, appName str
 }
 
 // GetAppSourceType returns explicit application source type or examines a directory and determines its application source type
-func GetAppSourceType(ctx context.Context, source *v1alpha1.ApplicationSource, appPath, repoPath, appName string, enableGenerateManifests map[string]bool, tarExcludedGlobs []string) (v1alpha1.ApplicationSourceType, error) {
+func GetAppSourceType(ctx context.Context, source *v1alpha1.ApplicationSource, appPath, repoPath, appName string, enableGenerateManifests map[string]bool, tarExcludedGlobs []string, env []string) (v1alpha1.ApplicationSourceType, error) {
 	err := mergeSourceParameters(source, appPath, appName)
 	if err != nil {
 		return "", fmt.Errorf("error while parsing source parameters: %v", err)
@@ -1505,9 +1576,9 @@ func GetAppSourceType(ctx context.Context, source *v1alpha1.ApplicationSource, a
 		}
 		return *appSourceType, nil
 	}
-	appType, err := discovery.AppType(ctx, appPath, repoPath, enableGenerateManifests, tarExcludedGlobs)
+	appType, err := discovery.AppType(ctx, appPath, repoPath, enableGenerateManifests, tarExcludedGlobs, env)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error getting app source type: %v", err)
 	}
 	return v1alpha1.ApplicationSourceType(appType), nil
 }
@@ -1815,25 +1886,17 @@ func makeJsonnetVm(appPath string, repoRoot string, sourceJsonnet v1alpha1.Appli
 	return vm, nil
 }
 
-func getPluginEnvs(env *v1alpha1.Env, q *apiclient.ManifestRequest, creds git.Creds) ([]string, error) {
+func getPluginEnvs(env *v1alpha1.Env, q *apiclient.ManifestRequest) ([]string, error) {
 	envVars := env.Environ()
 	envVars = append(envVars, "KUBE_VERSION="+text.SemVer(q.KubeVersion))
 	envVars = append(envVars, "KUBE_API_VERSIONS="+strings.Join(q.ApiVersions, ","))
 
-	return getPluginParamEnvs(envVars, q.ApplicationSource.Plugin, creds)
+	return getPluginParamEnvs(envVars, q.ApplicationSource.Plugin)
 }
 
 // getPluginParamEnvs gets environment variables for plugin parameter announcement generation.
-func getPluginParamEnvs(envVars []string, plugin *v1alpha1.ApplicationSourcePlugin, creds git.Creds) ([]string, error) {
+func getPluginParamEnvs(envVars []string, plugin *v1alpha1.ApplicationSourcePlugin) ([]string, error) {
 	env := envVars
-	if creds != nil {
-		closer, environ, err := creds.Environ()
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = closer.Close() }()
-		env = append(env, environ...)
-	}
 
 	parsedEnv := make(v1alpha1.Env, len(env))
 	for i, v := range env {
@@ -1860,9 +1923,9 @@ func getPluginParamEnvs(envVars []string, plugin *v1alpha1.ApplicationSourcePlug
 	return env, nil
 }
 
-func runConfigManagementPluginSidecars(ctx context.Context, appPath, repoPath, pluginName string, envVars *v1alpha1.Env, q *apiclient.ManifestRequest, creds git.Creds, tarDoneCh chan<- bool, tarExcludedGlobs []string) ([]*unstructured.Unstructured, error) {
+func runConfigManagementPluginSidecars(ctx context.Context, appPath, repoPath, pluginName string, envVars *v1alpha1.Env, q *apiclient.ManifestRequest, tarDoneCh chan<- bool, tarExcludedGlobs []string) ([]*unstructured.Unstructured, error) {
 	// compute variables.
-	env, err := getPluginEnvs(envVars, q, creds)
+	env, err := getPluginEnvs(envVars, q)
 	if err != nil {
 		return nil, err
 	}
@@ -1925,7 +1988,9 @@ func (s *Service) GetAppDetails(ctx context.Context, q *apiclient.RepoServerAppD
 			return err
 		}
 
-		appSourceType, err := GetAppSourceType(ctx, q.Source, opContext.appPath, repoRoot, q.AppName, q.EnabledSourceTypes, s.initConstants.CMPTarExcludedGlobs)
+		env := newEnvRepoQuery(q, revision)
+
+		appSourceType, err := GetAppSourceType(ctx, q.Source, opContext.appPath, repoRoot, q.AppName, q.EnabledSourceTypes, s.initConstants.CMPTarExcludedGlobs, env.Environ())
 		if err != nil {
 			return err
 		}
@@ -1938,7 +2003,7 @@ func (s *Service) GetAppDetails(ctx context.Context, q *apiclient.RepoServerAppD
 				return err
 			}
 		case v1alpha1.ApplicationSourceTypeKustomize:
-			if err := populateKustomizeAppDetails(res, q, opContext.appPath, commitSHA, s.gitCredsStore); err != nil {
+			if err := populateKustomizeAppDetails(res, q, repoRoot, opContext.appPath, commitSHA, s.gitCredsStore); err != nil {
 				return err
 			}
 		case v1alpha1.ApplicationSourceTypePlugin:
@@ -1951,7 +2016,7 @@ func (s *Service) GetAppDetails(ctx context.Context, q *apiclient.RepoServerAppD
 	}
 
 	settings := operationSettings{allowConcurrent: q.Source.AllowsConcurrentProcessing(), noCache: q.NoCache, noRevisionCache: q.NoCache || q.NoRevisionCache}
-	err := s.runRepoOperation(ctx, q.Source.TargetRevision, q.Repo, q.Source, false, cacheFn, operation, settings, false, nil)
+	err := s.runRepoOperation(ctx, q.Source.TargetRevision, q.Repo, q.Source, false, cacheFn, operation, settings, len(q.RefSources) > 0, q.RefSources)
 
 	return res, err
 }
@@ -1975,12 +2040,13 @@ func (s *Service) createGetAppDetailsCacheHandler(res *apiclient.RepoAppDetailsR
 
 func populateHelmAppDetails(res *apiclient.RepoAppDetailsResponse, appPath string, repoRoot string, q *apiclient.RepoServerAppDetailsQuery, gitRepoPaths io.TempPaths) error {
 	var selectedValueFiles []string
+	var availableValueFiles []string
 
 	if q.Source.Helm != nil {
 		selectedValueFiles = q.Source.Helm.ValueFiles
 	}
 
-	availableValueFiles, err := findHelmValueFilesInPath(appPath)
+	err := filepath.Walk(appPath, walkHelmValueFilesInPath(appPath, &availableValueFiles))
 	if err != nil {
 		return err
 	}
@@ -2049,7 +2115,7 @@ func loadFileIntoIfExists(path pathutil.ResolvedFilePath, destination *string) e
 	if err == nil && !info.IsDir() {
 		bytes, err := os.ReadFile(stringPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("error reading file from %s: %w", stringPath, err)
 		}
 		*destination = string(bytes)
 	}
@@ -2057,35 +2123,34 @@ func loadFileIntoIfExists(path pathutil.ResolvedFilePath, destination *string) e
 	return nil
 }
 
-func findHelmValueFilesInPath(path string) ([]string, error) {
-	var result []string
+func walkHelmValueFilesInPath(root string, valueFiles *[]string) filepath.WalkFunc {
+	return func(path string, info os.FileInfo, err error) error {
 
-	files, err := os.ReadDir(path)
-	if err != nil {
-		return result, err
-	}
-
-	for _, f := range files {
-		if f.IsDir() {
-			continue
+		if err != nil {
+			return fmt.Errorf("error reading helm values file from %s: %w", path, err)
 		}
-		filename := f.Name()
-		fileNameExt := strings.ToLower(filepath.Ext(filename))
+
+		filename := info.Name()
+		fileNameExt := strings.ToLower(filepath.Ext(path))
 		if strings.Contains(filename, "values") && (fileNameExt == ".yaml" || fileNameExt == ".yml") {
-			result = append(result, filename)
+			relPath, err := filepath.Rel(root, path)
+			if err != nil {
+				return fmt.Errorf("error traversing path from %s to %s: %w", root, path, err)
+			}
+			*valueFiles = append(*valueFiles, relPath)
 		}
-	}
 
-	return result, nil
+		return nil
+	}
 }
 
-func populateKustomizeAppDetails(res *apiclient.RepoAppDetailsResponse, q *apiclient.RepoServerAppDetailsQuery, appPath string, reversion string, credsStore git.CredsStore) error {
+func populateKustomizeAppDetails(res *apiclient.RepoAppDetailsResponse, q *apiclient.RepoServerAppDetailsQuery, repoRoot string, appPath string, reversion string, credsStore git.CredsStore) error {
 	res.Kustomize = &apiclient.KustomizeAppSpec{}
 	kustomizeBinary := ""
 	if q.KustomizeOptions != nil {
 		kustomizeBinary = q.KustomizeOptions.BinaryPath
 	}
-	k := kustomize.NewKustomizeApp(appPath, q.Repo.GetGitCreds(credsStore), q.Repo.Repo, kustomizeBinary)
+	k := kustomize.NewKustomizeApp(repoRoot, appPath, q.Repo.GetGitCreds(credsStore), q.Repo.Repo, kustomizeBinary)
 	fakeManifestRequest := apiclient.ManifestRequest{
 		AppName:           q.AppName,
 		Namespace:         "", // FIXME: omit it for now
@@ -2104,8 +2169,6 @@ func populateKustomizeAppDetails(res *apiclient.RepoAppDetailsResponse, q *apicl
 func populatePluginAppDetails(ctx context.Context, res *apiclient.RepoAppDetailsResponse, appPath string, repoPath string, q *apiclient.RepoServerAppDetailsQuery, store git.CredsStore, tarExcludedGlobs []string) error {
 	res.Plugin = &apiclient.PluginAppSpec{}
 
-	creds := q.Repo.GetGitCreds(store)
-
 	envVars := []string{
 		fmt.Sprintf("ARGOCD_APP_NAME=%s", q.AppName),
 		fmt.Sprintf("ARGOCD_APP_SOURCE_REPO_URL=%s", q.Repo.Repo),
@@ -2113,7 +2176,7 @@ func populatePluginAppDetails(ctx context.Context, res *apiclient.RepoAppDetails
 		fmt.Sprintf("ARGOCD_APP_SOURCE_TARGET_REVISION=%s", q.Source.TargetRevision),
 	}
 
-	env, err := getPluginParamEnvs(envVars, q.Source.Plugin, creds)
+	env, err := getPluginParamEnvs(envVars, q.Source.Plugin)
 	if err != nil {
 		return fmt.Errorf("failed to get env vars for plugin: %w", err)
 	}
@@ -2129,19 +2192,19 @@ func populatePluginAppDetails(ctx context.Context, res *apiclient.RepoAppDetails
 	}
 	defer io.Close(conn)
 
-	generateManifestStream, err := cmpClient.GetParametersAnnouncement(ctx, grpc_retry.Disable())
+	parametersAnnouncementStream, err := cmpClient.GetParametersAnnouncement(ctx, grpc_retry.Disable())
 	if err != nil {
-		return fmt.Errorf("error getting generateManifestStream: %w", err)
+		return fmt.Errorf("error getting parametersAnnouncementStream: %w", err)
 	}
 
-	err = cmp.SendRepoStream(generateManifestStream.Context(), appPath, repoPath, generateManifestStream, env, tarExcludedGlobs)
+	err = cmp.SendRepoStream(parametersAnnouncementStream.Context(), appPath, repoPath, parametersAnnouncementStream, env, tarExcludedGlobs)
 	if err != nil {
 		return fmt.Errorf("error sending file to cmp-server: %s", err)
 	}
 
-	announcement, err := generateManifestStream.CloseAndRecv()
+	announcement, err := parametersAnnouncementStream.CloseAndRecv()
 	if err != nil {
-		return fmt.Errorf("failed to get parameter anouncement: %w", err)
+		return fmt.Errorf("failed to get parameter announcement: %w", err)
 	}
 
 	res.Plugin = &apiclient.PluginAppSpec{
@@ -2191,7 +2254,7 @@ func (s *Service) GetRevisionMetadata(ctx context.Context, q *apiclient.RepoServ
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error acquiring repo lock: %w", err)
 	}
 
 	defer io.Close(closer)
@@ -2244,7 +2307,7 @@ func (s *Service) GetRevisionChartDetails(ctx context.Context, q *apiclient.Repo
 	if err != nil {
 		return nil, fmt.Errorf("helm client error: %v", err)
 	}
-	chartPath, closer, err := helmClient.ExtractChart(q.Name, revision, false)
+	chartPath, closer, err := helmClient.ExtractChart(q.Name, revision, q.Repo.Project, false, s.initConstants.HelmManifestMaxExtractedSize, s.initConstants.DisableHelmManifestMaxExtractedSize)
 	if err != nil {
 		return nil, fmt.Errorf("error extracting chart: %v", err)
 	}
@@ -2274,7 +2337,11 @@ func fileParameters(q *apiclient.RepoServerAppDetailsQuery) []v1alpha1.HelmFileP
 }
 
 func (s *Service) newClient(repo *v1alpha1.Repository, opts ...git.ClientOpts) (git.Client, error) {
-	repoPath, err := s.gitRepoPaths.GetPath(git.NormalizeGitURL(repo.Repo))
+	keyData, err := json.Marshal(map[string]string{"url": git.NormalizeGitURL(repo.Repo), "project": repo.Project})
+	if err != nil {
+		return nil, err
+	}
+	repoPath, err := s.gitRepoPaths.GetPath(string(keyData))
 	if err != nil {
 		return nil, err
 	}
@@ -2291,6 +2358,7 @@ func (s *Service) newClientResolveRevision(repo *v1alpha1.Repository, revision s
 	}
 	commitSHA, err := gitClient.LsRemote(revision)
 	if err != nil {
+		s.metricsServer.IncGitLsRemoteFail(gitClient.Root(), revision)
 		return nil, "", err
 	}
 	return gitClient, commitSHA, nil
@@ -2320,7 +2388,7 @@ func (s *Service) newHelmClientResolveRevision(repo *v1alpha1.Repository, revisi
 		return helmClient, version.String(), nil
 	}
 
-	index, err := helmClient.GetIndex(noRevisionCache)
+	index, err := helmClient.GetIndex(noRevisionCache, s.initConstants.HelmRegistryMaxIndexSize)
 	if err != nil {
 		return nil, "", err
 	}
@@ -2361,7 +2429,11 @@ func directoryPermissionInitializer(rootPath string) goio.Closer {
 // nolint:unparam
 func (s *Service) checkoutRevision(gitClient git.Client, revision string, submoduleEnabled bool) (goio.Closer, error) {
 	closer := s.gitRepoInitializer(gitClient.Root())
-	return closer, checkoutRevision(gitClient, revision, submoduleEnabled)
+	err := checkoutRevision(gitClient, revision, submoduleEnabled)
+	if err != nil {
+		s.metricsServer.IncGitFetchFail(gitClient.Root(), revision)
+	}
+	return closer, err
 }
 
 func checkoutRevision(gitClient git.Client, revision string, submoduleEnabled bool) error {
@@ -2398,7 +2470,7 @@ func checkoutRevision(gitClient git.Client, revision string, submoduleEnabled bo
 }
 
 func (s *Service) GetHelmCharts(ctx context.Context, q *apiclient.HelmChartsRequest) (*apiclient.HelmChartsResponse, error) {
-	index, err := s.newHelmClient(q.Repo.Repo, q.Repo.GetHelmCreds(), q.Repo.EnableOCI, q.Repo.Proxy, helm.WithChartPaths(s.chartPaths)).GetIndex(true)
+	index, err := s.newHelmClient(q.Repo.Repo, q.Repo.GetHelmCreds(), q.Repo.EnableOCI, q.Repo.Proxy, helm.WithChartPaths(s.chartPaths)).GetIndex(true, s.initConstants.HelmRegistryMaxIndexSize)
 	if err != nil {
 		return nil, err
 	}
@@ -2433,7 +2505,7 @@ func (s *Service) TestRepository(ctx context.Context, q *apiclient.TestRepositor
 				_, err := helm.NewClient(repo.Repo, repo.GetHelmCreds(), repo.EnableOCI, repo.Proxy).TestHelmOCI()
 				return err
 			} else {
-				_, err := helm.NewClient(repo.Repo, repo.GetHelmCreds(), repo.EnableOCI, repo.Proxy).GetIndex(false)
+				_, err := helm.NewClient(repo.Repo, repo.GetHelmCreds(), repo.EnableOCI, repo.Proxy).GetIndex(false, s.initConstants.HelmRegistryMaxIndexSize)
 				return err
 			}
 		},
@@ -2454,7 +2526,7 @@ func (s *Service) ResolveRevision(ctx context.Context, q *apiclient.ResolveRevis
 	app := q.App
 	ambiguousRevision := q.AmbiguousRevision
 	var revision string
-	var source = app.Spec.GetSource()
+	var source = app.Spec.GetSourcePtrByIndex(int(q.SourceIndex))
 	if source.IsHelm() {
 		_, revision, err := s.newHelmClientResolveRevision(repo, ambiguousRevision, source.Chart, true)
 
@@ -2472,6 +2544,7 @@ func (s *Service) ResolveRevision(ctx context.Context, q *apiclient.ResolveRevis
 		}
 		revision, err = gitClient.LsRemote(ambiguousRevision)
 		if err != nil {
+			s.metricsServer.IncGitLsRemoteFail(gitClient.Root(), revision)
 			return &apiclient.ResolveRevisionResponse{Revision: "", AmbiguousRevision: ""}, err
 		}
 		return &apiclient.ResolveRevisionResponse{
@@ -2485,6 +2558,7 @@ func (s *Service) GetGitFiles(_ context.Context, request *apiclient.GitFilesRequ
 	repo := request.GetRepo()
 	revision := request.GetRevision()
 	gitPath := request.GetPath()
+	noRevisionCache := request.GetNoRevisionCache()
 	enableNewGitFileGlobbing := request.GetNewGitFileGlobbingEnabled()
 	if gitPath == "" {
 		gitPath = "."
@@ -2494,7 +2568,7 @@ func (s *Service) GetGitFiles(_ context.Context, request *apiclient.GitFilesRequ
 		return nil, status.Error(codes.InvalidArgument, "must pass a valid repo")
 	}
 
-	gitClient, revision, err := s.newClientResolveRevision(repo, revision, git.WithCache(s.cache, true))
+	gitClient, revision, err := s.newClientResolveRevision(repo, revision, git.WithCache(s.cache, !noRevisionCache))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "unable to resolve git revision %s: %v", revision, err)
 	}
@@ -2547,12 +2621,12 @@ func (s *Service) GetGitFiles(_ context.Context, request *apiclient.GitFilesRequ
 func (s *Service) GetGitDirectories(_ context.Context, request *apiclient.GitDirectoriesRequest) (*apiclient.GitDirectoriesResponse, error) {
 	repo := request.GetRepo()
 	revision := request.GetRevision()
-
+	noRevisionCache := request.GetNoRevisionCache()
 	if repo == nil {
 		return nil, status.Error(codes.InvalidArgument, "must pass a valid repo")
 	}
 
-	gitClient, revision, err := s.newClientResolveRevision(repo, revision, git.WithCache(s.cache, true))
+	gitClient, revision, err := s.newClientResolveRevision(repo, revision, git.WithCache(s.cache, !noRevisionCache))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "unable to resolve git revision %s: %v", revision, err)
 	}
@@ -2587,9 +2661,8 @@ func (s *Service) GetGitDirectories(_ context.Context, request *apiclient.GitDir
 			return nil
 		}
 
-		fname := entry.Name()
-		if strings.HasPrefix(fname, ".") { // Skip all folders starts with "."
-			return filepath.SkipDir
+		if !s.initConstants.IncludeHiddenDirectories && strings.HasPrefix(entry.Name(), ".") {
+			return filepath.SkipDir // Skip hidden directory
 		}
 
 		relativePath, err := filepath.Rel(repoRoot, path)
@@ -2617,4 +2690,105 @@ func (s *Service) GetGitDirectories(_ context.Context, request *apiclient.GitDir
 	return &apiclient.GitDirectoriesResponse{
 		Paths: paths,
 	}, nil
+}
+
+// UpdateRevisionForPaths compares two git revisions and checks if the files in the given paths have changed
+// If no files were changed, it will store the already cached manifest to the key corresponding to the old revision, avoiding an unnecessary generation.
+// Example: cache has key "a1a1a1" with manifest "x", and the files for that manifest have not changed,
+// "x" will be stored again with the new revision "b2b2b2".
+func (s *Service) UpdateRevisionForPaths(_ context.Context, request *apiclient.UpdateRevisionForPathsRequest) (*apiclient.UpdateRevisionForPathsResponse, error) {
+	logCtx := log.WithFields(log.Fields{"application": request.AppName, "appNamespace": request.Namespace})
+
+	repo := request.GetRepo()
+	revision := request.GetRevision()
+	syncedRevision := request.GetSyncedRevision()
+	refreshPaths := request.GetPaths()
+
+	if repo == nil {
+		return nil, status.Error(codes.InvalidArgument, "must pass a valid repo")
+	}
+
+	if len(refreshPaths) == 0 {
+		// Always refresh if path is not specified
+		return &apiclient.UpdateRevisionForPathsResponse{}, nil
+	}
+
+	gitClientOpts := git.WithCache(s.cache, true)
+	gitClient, revision, err := s.newClientResolveRevision(repo, revision, gitClientOpts)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "unable to resolve git revision %s: %v", revision, err)
+	}
+
+	syncedRevision, err = gitClient.LsRemote(syncedRevision)
+	if err != nil {
+		s.metricsServer.IncGitLsRemoteFail(gitClient.Root(), revision)
+		return nil, status.Errorf(codes.Internal, "unable to resolve git revision %s: %v", revision, err)
+	}
+
+	// No need to compare if it is the same revision
+	if revision == syncedRevision {
+		return &apiclient.UpdateRevisionForPathsResponse{}, nil
+	}
+
+	s.metricsServer.IncPendingRepoRequest(repo.Repo)
+	defer s.metricsServer.DecPendingRepoRequest(repo.Repo)
+
+	closer, err := s.repoLock.Lock(gitClient.Root(), revision, true, func() (goio.Closer, error) {
+		return s.checkoutRevision(gitClient, revision, false)
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "unable to checkout git repo %s with revision %s: %v", repo.Repo, revision, err)
+	}
+	defer io.Close(closer)
+
+	files, err := gitClient.ChangedFiles(syncedRevision, revision)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "unable to get changed files for repo %s with revision %s: %v", repo.Repo, revision, err)
+	}
+
+	changed := apppathutil.AppFilesHaveChanged(refreshPaths, files)
+
+	if !changed {
+		logCtx.Debugf("no changes found for application %s in repo %s from revision %s to revision %s", request.AppName, repo.Repo, syncedRevision, revision)
+
+		err := s.updateCachedRevision(logCtx, syncedRevision, revision, request, gitClientOpts)
+		if err != nil {
+			// Only warn with the error, no need to block anything if there is a caching error.
+			logCtx.Warnf("error updating cached revision for repo %s with revision %s: %v", repo.Repo, revision, err)
+			return &apiclient.UpdateRevisionForPathsResponse{}, nil
+		}
+
+		return &apiclient.UpdateRevisionForPathsResponse{}, nil
+	}
+
+	logCtx.Debugf("changes found for application %s in repo %s from revision %s to revision %s", request.AppName, repo.Repo, syncedRevision, revision)
+	return &apiclient.UpdateRevisionForPathsResponse{}, nil
+}
+
+func (s *Service) updateCachedRevision(logCtx *log.Entry, oldRev string, newRev string, request *apiclient.UpdateRevisionForPathsRequest, gitClientOpts git.ClientOpts) error {
+	repoRefs := make(map[string]string)
+	if request.HasMultipleSources && request.ApplicationSource.Helm != nil {
+		var err error
+		repoRefs, err = resolveReferencedSources(true, request.ApplicationSource.Helm, request.RefSources, s.newClientResolveRevision, gitClientOpts)
+		if err != nil {
+			return fmt.Errorf("failed to get repo refs for application %s in repo %s from revision %s: %w", request.AppName, request.GetRepo().Repo, request.Revision, err)
+		}
+
+		// Update revision in refSource
+		for normalizedURL := range repoRefs {
+			repoRefs[normalizedURL] = newRev
+		}
+	}
+
+	err := s.cache.SetNewRevisionManifests(newRev, oldRev, request.ApplicationSource, request.RefSources, request, request.Namespace, request.TrackingMethod, request.AppLabelKey, request.AppName, repoRefs)
+	if err != nil {
+		if err == cache.ErrCacheMiss {
+			logCtx.Debugf("manifest cache miss during comparison for application %s in repo %s from revision %s", request.AppName, request.GetRepo().Repo, oldRev)
+			return nil
+		}
+		return fmt.Errorf("manifest cache move error for %s: %w", request.AppName, err)
+	}
+
+	logCtx.Debugf("manifest cache updated for application %s in repo %s from revision %s to revision %s", request.AppName, request.GetRepo().Repo, oldRev, newRev)
+	return nil
 }

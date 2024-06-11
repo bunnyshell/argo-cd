@@ -35,6 +35,10 @@ const (
 	errDestinationMissing = "Destination server missing from app spec"
 )
 
+var (
+	ErrAnotherOperationInProgress = status.Errorf(codes.FailedPrecondition, "another operation is already in progress")
+)
+
 // AugmentSyncMsg enrich the K8s message with user-relevant information
 func AugmentSyncMsg(res common.ResourceSyncResult, apiResourceInfoGetter func() ([]kube.APIResourceInfo, error)) (string, error) {
 	switch res.Message {
@@ -47,6 +51,12 @@ func AugmentSyncMsg(res common.ResourceSyncResult, apiResourceInfoGetter func() 
 			res.Message = fmt.Sprintf("The Kubernetes API could not find %s/%s for requested resource %s/%s. Make sure the %q CRD is installed on the destination cluster.", res.ResourceKey.Group, res.ResourceKey.Kind, res.ResourceKey.Namespace, res.ResourceKey.Name, res.ResourceKey.Kind)
 		} else {
 			res.Message = fmt.Sprintf("The Kubernetes API could not find version %q of %s/%s for requested resource %s/%s. Version %q of %s/%s is installed on the destination cluster.", res.Version, res.ResourceKey.Group, res.ResourceKey.Kind, res.ResourceKey.Namespace, res.ResourceKey.Name, resource.GroupVersionResource.Version, resource.GroupKind.Group, resource.GroupKind.Kind)
+		}
+
+	default:
+		// Check if the message contains "metadata.annotation: Too long"
+		if strings.Contains(res.Message, "metadata.annotations: Too long: must have at most 262144 bytes") {
+			res.Message = fmt.Sprintf("%s \n -Additional Info: This error usually means that you are trying to add a large resource on client side. Consider using Server-side apply or syncing with replace enabled. Note: Syncing with Replace enabled is potentially destructive as it may cause resource deletion and re-creation.", res.Message)
 		}
 	}
 
@@ -378,7 +388,7 @@ func validateRepo(ctx context.Context,
 	errMessage := ""
 
 	for _, source := range sources {
-		repo, err := db.GetRepository(ctx, source.RepoURL)
+		repo, err := db.GetRepository(ctx, source.RepoURL, proj.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -408,7 +418,7 @@ func validateRepo(ctx context.Context,
 		}
 	}
 
-	refSources, err := GetRefSources(ctx, app.Spec, db)
+	refSources, err := GetRefSources(ctx, sources, app.Spec.Project, db.GetRepository, []string{}, false)
 	if err != nil {
 		return nil, fmt.Errorf("error getting ref sources: %w", err)
 	}
@@ -436,12 +446,12 @@ func validateRepo(ctx context.Context,
 // GetRefSources creates a map of ref keys (from the sources' 'ref' fields) to information about the referenced source.
 // This function also validates the references use allowed characters and does not define the same ref key more than
 // once (which would lead to ambiguous references).
-func GetRefSources(ctx context.Context, spec argoappv1.ApplicationSpec, db db.ArgoDB) (argoappv1.RefTargetRevisionMapping, error) {
+func GetRefSources(ctx context.Context, sources argoappv1.ApplicationSources, project string, getRepository func(ctx context.Context, url string, project string) (*argoappv1.Repository, error), revisions []string, isRollback bool) (argoappv1.RefTargetRevisionMapping, error) {
 	refSources := make(argoappv1.RefTargetRevisionMapping)
-	if spec.HasMultipleSources() {
+	if len(sources) > 1 {
 		// Validate first to avoid unnecessary DB calls.
 		refKeys := make(map[string]bool)
-		for _, source := range spec.Sources {
+		for _, source := range sources {
 			if source.Ref != "" {
 				isValidRefKey := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString
 				if !isValidRefKey(source.Ref) {
@@ -455,16 +465,20 @@ func GetRefSources(ctx context.Context, spec argoappv1.ApplicationSpec, db db.Ar
 			}
 		}
 		// Get Repositories for all sources before generating Manifests
-		for _, source := range spec.Sources {
+		for i, source := range sources {
 			if source.Ref != "" {
-				repo, err := db.GetRepository(ctx, source.RepoURL)
+				repo, err := getRepository(ctx, source.RepoURL, project)
 				if err != nil {
 					return nil, fmt.Errorf("failed to get repository %s: %v", source.RepoURL, err)
 				}
 				refKey := "$" + source.Ref
+				revision := source.TargetRevision
+				if isRollback {
+					revision = revisions[i]
+				}
 				refSources[refKey] = &argoappv1.RefTarget{
 					Repo:           *repo,
-					TargetRevision: source.TargetRevision,
+					TargetRevision: revision,
 					Chart:          source.Chart,
 				}
 			}
@@ -690,8 +704,7 @@ func GetAppProject(app *argoappv1.Application, projLister applicationsv1.AppProj
 		return nil, err
 	}
 	if !proj.IsAppNamespacePermitted(app, ns) {
-		return nil, fmt.Errorf("application '%s' in namespace '%s' is not allowed to use project '%s'",
-			app.Name, app.Namespace, proj.Name)
+		return nil, argoappv1.NewErrApplicationNotAllowedToUseProject(app.Name, app.Namespace, proj.Name)
 	}
 	return proj, nil
 }
@@ -733,7 +746,7 @@ func verifyGenerateManifests(
 	}
 
 	for _, source := range sources {
-		repoRes, err := db.GetRepository(ctx, source.RepoURL)
+		repoRes, err := db.GetRepository(ctx, source.RepoURL, proj.Name)
 		if err != nil {
 			conditions = append(conditions, argoappv1.ApplicationCondition{
 				Type:    argoappv1.ApplicationConditionInvalidSpecError,
@@ -800,7 +813,7 @@ func SetAppOperation(appIf v1alpha1.ApplicationInterface, appName string, op *ar
 			return nil, fmt.Errorf("error getting application %q: %w", appName, err)
 		}
 		if a.Operation != nil {
-			return nil, status.Errorf(codes.FailedPrecondition, "another operation is already in progress")
+			return nil, ErrAnotherOperationInProgress
 		}
 		a.Operation = op
 		a.Status.OperationState = nil
@@ -851,12 +864,15 @@ func NormalizeApplicationSpec(spec *argoappv1.ApplicationSpec) *argoappv1.Applic
 	if spec.Project == "" {
 		spec.Project = argoappv1.DefaultAppProjectName
 	}
-
+	if spec.SyncPolicy.IsZero() {
+		spec.SyncPolicy = nil
+	}
 	if spec.Sources != nil && len(spec.Sources) > 0 {
 		for _, source := range spec.Sources {
 			NormalizeSource(&source)
 		}
-	} else {
+	} else if spec.Source != nil {
+		// In practice, spec.Source should never be nil.
 		NormalizeSource(spec.Source)
 	}
 	return spec

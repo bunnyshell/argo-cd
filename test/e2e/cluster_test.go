@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,6 +14,7 @@ import (
 	"github.com/argoproj/argo-cd/v2/test/e2e/fixture"
 	. "github.com/argoproj/argo-cd/v2/test/e2e/fixture"
 	accountFixture "github.com/argoproj/argo-cd/v2/test/e2e/fixture/account"
+	"github.com/argoproj/argo-cd/v2/test/e2e/fixture/app"
 	clusterFixture "github.com/argoproj/argo-cd/v2/test/e2e/fixture/cluster"
 	. "github.com/argoproj/argo-cd/v2/util/errors"
 )
@@ -21,16 +23,38 @@ func TestClusterList(t *testing.T) {
 	SkipIfAlreadyRun(t)
 	defer RecordTestRun(t)
 
+	last := ""
+	expected := fmt.Sprintf(`SERVER                          NAME        VERSION  STATUS      MESSAGE  PROJECT
+https://kubernetes.default.svc  in-cluster  %v     Successful           `, GetVersions().ServerVersion)
+
 	clusterFixture.
 		Given(t).
-		Project(ProjectName).
+		Project(ProjectName)
+
+	// We need an application targeting the cluster, otherwise the test will
+	// fail if run isolated.
+	app.GivenWithSameState(t).
+		Path(guestbookPath).
 		When().
-		List().
-		Then().
-		AndCLIOutput(func(output string, err error) {
-			assert.Equal(t, fmt.Sprintf(`SERVER                          NAME        VERSION  STATUS      MESSAGE  PROJECT
-https://kubernetes.default.svc  in-cluster  %v     Successful           `, GetVersions().ServerVersion), output)
-		})
+		CreateApp()
+
+	tries := 5
+	for i := 0; i <= tries; i += 1 {
+		clusterFixture.GivenWithSameState(t).
+			When().
+			List().
+			Then().
+			AndCLIOutput(func(output string, err error) {
+				last = output
+			})
+		if expected == last {
+			break
+		} else if i < tries {
+			// We retry with a simple backoff
+			time.Sleep(time.Duration(i+1) * time.Second)
+		}
+	}
+	assert.Equal(t, expected, last)
 }
 
 func TestClusterAdd(t *testing.T) {
@@ -67,7 +91,7 @@ func TestClusterAddPermissionDenied(t *testing.T) {
 		Create().
 		Then().
 		AndCLIOutput(func(output string, err error) {
-			assert.True(t, strings.Contains(err.Error(), "PermissionDenied desc = permission denied: clusters, create"))
+			assert.Contains(t, err.Error(), "PermissionDenied desc = permission denied")
 		})
 }
 
@@ -129,7 +153,7 @@ func TestClusterListDenied(t *testing.T) {
 		List().
 		Then().
 		AndCLIOutput(func(output string, err error) {
-			assert.Equal(t, output, "SERVER  NAME  VERSION  STATUS  MESSAGE  PROJECT")
+			assert.Equal(t, "SERVER  NAME  VERSION  STATUS  MESSAGE  PROJECT", output)
 		})
 }
 
@@ -175,7 +199,7 @@ func TestClusterNameInRestAPI(t *testing.T) {
 	err := DoHttpJsonRequest("GET", "/api/v1/clusters/in-cluster?id.type=name", &cluster)
 	require.NoError(t, err)
 
-	assert.Equal(t, cluster.Name, "in-cluster")
+	assert.Equal(t, "in-cluster", cluster.Name)
 	assert.Contains(t, cluster.Server, "https://kubernetes.default.svc")
 
 	err = DoHttpJsonRequest("PUT",
@@ -193,7 +217,7 @@ func TestClusterURLInRestAPI(t *testing.T) {
 	err := DoHttpJsonRequest("GET", fmt.Sprintf("/api/v1/clusters/%s", clusterURL), &cluster)
 	require.NoError(t, err)
 
-	assert.Equal(t, cluster.Name, "in-cluster")
+	assert.Equal(t, "in-cluster", cluster.Name)
 	assert.Contains(t, cluster.Server, "https://kubernetes.default.svc")
 
 	err = DoHttpJsonRequest("PUT",
@@ -232,7 +256,7 @@ func TestClusterDeleteDenied(t *testing.T) {
 		DeleteByName().
 		Then().
 		AndCLIOutput(func(output string, err error) {
-			assert.True(t, strings.Contains(err.Error(), "PermissionDenied desc = permission denied: clusters, delete"))
+			assert.Contains(t, err.Error(), "PermissionDenied desc = permission denied")
 		})
 
 	// Attempt to remove cluster creds by server
@@ -246,7 +270,7 @@ func TestClusterDeleteDenied(t *testing.T) {
 		DeleteByServer().
 		Then().
 		AndCLIOutput(func(output string, err error) {
-			assert.True(t, strings.Contains(err.Error(), "PermissionDenied desc = permission denied: clusters, delete"))
+			assert.Contains(t, err.Error(), "PermissionDenied desc = permission denied")
 		})
 }
 

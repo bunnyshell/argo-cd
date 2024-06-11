@@ -21,7 +21,20 @@ const RenderContainerState = (props: {container: any}) => {
 
     return (
         <div className='application-node-info__container'>
-            <div className='application-node-info__container--name'>{props.container.name}</div>
+            <div className='application-node-info__container--name'>
+                {props.container.state?.running && (
+                    <span style={{marginRight: '4px'}}>
+                        <i className='fa fa-check-circle' style={{color: 'rgb(24, 190, 148)'}} />
+                    </span>
+                )}
+                {(props.container.state.terminated && props.container.state.terminated?.exitCode !== 0) ||
+                    (lastState && lastState?.exitCode !== 0 && (
+                        <span style={{marginRight: '4px'}}>
+                            <i className='fa fa-times-circle' style={{color: 'red'}} />
+                        </span>
+                    ))}
+                {props.container.name}
+            </div>
             <div>
                 {state && (
                     <>
@@ -48,8 +61,8 @@ const RenderContainerState = (props: {container: any}) => {
                 )}
                 <>
                     {' '}
-                    It is <span className='application-node-info__container--highlight'>{props.container?.started ? 'started' : 'not started'}</span> and
-                    <span className='application-node-info__container--highlight'>{props.container?.ready ? ' ready.' : ' not ready.'}</span>
+                    It is <span className='application-node-info__container--highlight'>{props.container?.started ? 'started' : 'not started'}</span>
+                    <span className='application-node-info__container--highlight'>{status === 'Completed' ? '.' : props.container?.ready ? ' and ready.' : ' and not ready.'}</span>
                 </>
                 <br />
                 {lastState && (

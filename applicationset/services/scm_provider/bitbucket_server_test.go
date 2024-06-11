@@ -80,7 +80,7 @@ func defaultHandler(t *testing.T) func(http.ResponseWriter, *http.Request) {
 
 func verifyDefaultRepo(t *testing.T, err error, repos []*Repository) {
 	assert.NoError(t, err)
-	assert.Equal(t, 1, len(repos))
+	assert.Len(t, repos, 1)
 	assert.Equal(t, Repository{
 		Organization: "PROJECT",
 		Repository:   "REPO",
@@ -194,7 +194,7 @@ func TestListReposPagination(t *testing.T) {
 	assert.NoError(t, err)
 	repos, err := provider.ListRepos(context.Background(), "ssh")
 	assert.NoError(t, err)
-	assert.Equal(t, 2, len(repos))
+	assert.Len(t, repos, 2)
 	assert.Equal(t, Repository{
 		Organization: "PROJECT",
 		Repository:   "REPO",
@@ -277,7 +277,7 @@ func TestGetBranchesBranchPagination(t *testing.T) {
 		RepositoryId: 1,
 	})
 	assert.NoError(t, err)
-	assert.Equal(t, 2, len(repos))
+	assert.Len(t, repos, 2)
 	assert.Equal(t, Repository{
 		Organization: "PROJECT",
 		Repository:   "REPO",
@@ -330,7 +330,7 @@ func TestGetBranchesDefaultOnly(t *testing.T) {
 		RepositoryId: 1,
 	})
 	assert.NoError(t, err)
-	assert.Equal(t, 1, len(repos))
+	assert.Len(t, repos, 1)
 	assert.Equal(t, Repository{
 		Organization: "PROJECT",
 		Repository:   "REPO",
@@ -363,6 +363,28 @@ func TestGetBranchesMissingDefault(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.Empty(t, repos)
+}
+
+func TestGetBranchesEmptyRepo(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Empty(t, r.Header.Get("Authorization"))
+		switch r.RequestURI {
+		case "/rest/api/1.0/projects/PROJECT/repos/REPO/branches/default":
+			return
+		}
+	}))
+	defer ts.Close()
+	provider, err := NewBitbucketServerProviderNoAuth(context.Background(), ts.URL, "PROJECT", false)
+	assert.NoError(t, err)
+	repos, err := provider.GetBranches(context.Background(), &Repository{
+		Organization: "PROJECT",
+		Repository:   "REPO",
+		URL:          "ssh://git@mycompany.bitbucket.org/PROJECT/REPO.git",
+		Labels:       []string{},
+		RepositoryId: 1,
+	})
+	assert.Empty(t, repos)
+	assert.NoError(t, err)
 }
 
 func TestGetBranchesErrorDefaultBranch(t *testing.T) {
@@ -425,7 +447,7 @@ func TestListReposDefaultBranch(t *testing.T) {
 	assert.NoError(t, err)
 	repos, err := provider.ListRepos(context.Background(), "ssh")
 	assert.NoError(t, err)
-	assert.Equal(t, 1, len(repos))
+	assert.Len(t, repos, 1)
 	assert.Equal(t, Repository{
 		Organization: "PROJECT",
 		Repository:   "REPO",
@@ -480,7 +502,7 @@ func TestListReposCloneProtocol(t *testing.T) {
 	assert.NoError(t, err)
 	repos, err := provider.ListRepos(context.Background(), "https")
 	assert.NoError(t, err)
-	assert.Equal(t, 1, len(repos))
+	assert.Len(t, repos, 1)
 	assert.Equal(t, Repository{
 		Organization: "PROJECT",
 		Repository:   "REPO",
@@ -501,7 +523,7 @@ func TestListReposUnknownProtocol(t *testing.T) {
 	provider, err := NewBitbucketServerProviderNoAuth(context.Background(), ts.URL, "PROJECT", true)
 	assert.NoError(t, err)
 	_, errProtocol := provider.ListRepos(context.Background(), "http")
-	assert.NotNil(t, errProtocol)
+	assert.Error(t, errProtocol)
 }
 
 func TestBitbucketServerHasPath(t *testing.T) {

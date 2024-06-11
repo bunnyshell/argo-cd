@@ -16,7 +16,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/argoproj/argo-cd/v2/util/env"
 	"github.com/argoproj/gitops-engine/pkg/health"
 	synccommon "github.com/argoproj/gitops-engine/pkg/sync/common"
 	"github.com/robfig/cron/v3"
@@ -38,7 +37,9 @@ import (
 
 	"github.com/argoproj/argo-cd/v2/common"
 	"github.com/argoproj/argo-cd/v2/util/collections"
+	"github.com/argoproj/argo-cd/v2/util/env"
 	"github.com/argoproj/argo-cd/v2/util/helm"
+	utilhttp "github.com/argoproj/argo-cd/v2/util/http"
 	"github.com/argoproj/argo-cd/v2/util/security"
 )
 
@@ -50,6 +51,7 @@ import (
 // +kubebuilder:printcolumn:name="Sync Status",type=string,JSONPath=`.status.sync.status`
 // +kubebuilder:printcolumn:name="Health Status",type=string,JSONPath=`.status.health.status`
 // +kubebuilder:printcolumn:name="Revision",type=string,JSONPath=`.status.sync.revision`,priority=10
+// +kubebuilder:printcolumn:name="Project",type=string,JSONPath=`.spec.project`,priority=10
 type Application struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata" protobuf:"bytes,1,opt,name=metadata"`
@@ -70,7 +72,7 @@ type ApplicationSpec struct {
 	// SyncPolicy controls when and how a sync will be performed
 	SyncPolicy *SyncPolicy `json:"syncPolicy,omitempty" protobuf:"bytes,4,name=syncPolicy"`
 	// IgnoreDifferences is a list of resources and their fields which should be ignored during comparison
-	IgnoreDifferences []ResourceIgnoreDifferences `json:"ignoreDifferences,omitempty" protobuf:"bytes,5,name=ignoreDifferences"`
+	IgnoreDifferences IgnoreDifferences `json:"ignoreDifferences,omitempty" protobuf:"bytes,5,name=ignoreDifferences"`
 	// Info contains a list of information (URLs, email addresses, and plain text) that relates to the application
 	Info []Info `json:"info,omitempty" protobuf:"bytes,6,name=info"`
 	// RevisionHistoryLimit limits the number of items kept in the application's revision history, which is used for informational purposes as well as for rollbacks to previous versions.
@@ -82,6 +84,12 @@ type ApplicationSpec struct {
 
 	// Sources is a reference to the location of the application's manifests or chart
 	Sources ApplicationSources `json:"sources,omitempty" protobuf:"bytes,8,opt,name=sources"`
+}
+
+type IgnoreDifferences []ResourceIgnoreDifferences
+
+func (id IgnoreDifferences) Equals(other IgnoreDifferences) bool {
+	return reflect.DeepEqual(id, other)
 }
 
 type TrackingMethod string
@@ -198,6 +206,11 @@ func (s ApplicationSources) Equals(other ApplicationSources) bool {
 	return true
 }
 
+// IsZero returns true if the application source is considered empty
+func (a ApplicationSources) IsZero() bool {
+	return len(a) == 0
+}
+
 func (a *ApplicationSpec) GetSource() ApplicationSource {
 	// if Application has multiple sources, return the first source in sources
 	if a.HasMultipleSources() {
@@ -223,9 +236,17 @@ func (a *ApplicationSpec) HasMultipleSources() bool {
 	return a.Sources != nil && len(a.Sources) > 0
 }
 
-func (a *ApplicationSpec) GetSourcePtr() *ApplicationSource {
+func (a *ApplicationSpec) GetSourcePtrByPosition(sourcePosition int) *ApplicationSource {
+	// if Application has multiple sources, return the first source in sources
+	return a.GetSourcePtrByIndex(sourcePosition - 1)
+}
+
+func (a *ApplicationSpec) GetSourcePtrByIndex(sourceIndex int) *ApplicationSource {
 	// if Application has multiple sources, return the first source in sources
 	if a.HasMultipleSources() {
+		if sourceIndex > 0 {
+			return &a.Sources[sourceIndex]
+		}
 		return &a.Sources[0]
 	}
 	return a.Source
@@ -239,6 +260,11 @@ func (a *ApplicationSource) AllowsConcurrentProcessing() bool {
 		return a.Kustomize.AllowsConcurrentProcessing()
 	}
 	return true
+}
+
+// IsRef returns true when the application source is of type Ref
+func (a *ApplicationSource) IsRef() bool {
+	return a.Ref != ""
 }
 
 // IsHelm returns true when the application source is of type Helm
@@ -458,6 +484,12 @@ type ApplicationSourceKustomize struct {
 	CommonAnnotationsEnvsubst bool `json:"commonAnnotationsEnvsubst,omitempty" protobuf:"bytes,10,opt,name=commonAnnotationsEnvsubst"`
 	// Replicas is a list of Kustomize Replicas override specifications
 	Replicas KustomizeReplicas `json:"replicas,omitempty" protobuf:"bytes,11,opt,name=replicas"`
+	// Patches is a list of Kustomize patches
+	Patches KustomizePatches `json:"patches,omitempty" protobuf:"bytes,12,opt,name=patches"`
+	// Components specifies a list of kustomize components to add to the kustomization before building
+	Components []string `json:"components,omitempty" protobuf:"bytes,13,rep,name=components"`
+	//LabelWithoutSelector specifies whether to apply common labels to resource selectors or not
+	LabelWithoutSelector bool `json:"labelWithoutSelector,omitempty" protobuf:"bytes,14,opt,name=labelWithoutSelector"`
 }
 
 type KustomizeReplica struct {
@@ -502,6 +534,43 @@ func NewKustomizeReplica(text string) (*KustomizeReplica, error) {
 	return kr, nil
 }
 
+type KustomizePatches []KustomizePatch
+
+type KustomizePatch struct {
+	Path    string             `json:"path,omitempty" yaml:"path,omitempty" protobuf:"bytes,1,opt,name=path"`
+	Patch   string             `json:"patch,omitempty" yaml:"patch,omitempty" protobuf:"bytes,2,opt,name=patch"`
+	Target  *KustomizeSelector `json:"target,omitempty" yaml:"target,omitempty" protobuf:"bytes,3,opt,name=target"`
+	Options map[string]bool    `json:"options,omitempty" yaml:"options,omitempty" protobuf:"bytes,4,opt,name=options"`
+}
+
+// Copied from: https://github.com/kubernetes-sigs/kustomize/blob/cd7ba1744eadb793ab7cd056a76ee8a5ca725db9/api/types/patch.go
+func (p *KustomizePatch) Equals(o KustomizePatch) bool {
+	targetEqual := (p.Target == o.Target) ||
+		(p.Target != nil && o.Target != nil && *p.Target == *o.Target)
+	return p.Path == o.Path &&
+		p.Patch == o.Patch &&
+		targetEqual &&
+		reflect.DeepEqual(p.Options, o.Options)
+}
+
+type KustomizeSelector struct {
+	KustomizeResId     `json:",inline,omitempty" yaml:",inline,omitempty" protobuf:"bytes,1,opt,name=resId"`
+	AnnotationSelector string `json:"annotationSelector,omitempty" yaml:"annotationSelector,omitempty" protobuf:"bytes,2,opt,name=annotationSelector"`
+	LabelSelector      string `json:"labelSelector,omitempty" yaml:"labelSelector,omitempty" protobuf:"bytes,3,opt,name=labelSelector"`
+}
+
+type KustomizeResId struct {
+	KustomizeGvk `json:",inline,omitempty" yaml:",inline,omitempty" protobuf:"bytes,1,opt,name=gvk"`
+	Name         string `json:"name,omitempty" yaml:"name,omitempty" protobuf:"bytes,2,opt,name=name"`
+	Namespace    string `json:"namespace,omitempty" yaml:"namespace,omitempty" protobuf:"bytes,3,opt,name=namespace"`
+}
+
+type KustomizeGvk struct {
+	Group   string `json:"group,omitempty" yaml:"group,omitempty" protobuf:"bytes,1,opt,name=group"`
+	Version string `json:"version,omitempty" yaml:"version,omitempty" protobuf:"bytes,2,opt,name=version"`
+	Kind    string `json:"kind,omitempty" yaml:"kind,omitempty" protobuf:"bytes,3,opt,name=kind"`
+}
+
 // AllowsConcurrentProcessing returns true if multiple processes can run Kustomize builds on the same source at the same time
 func (k *ApplicationSourceKustomize) AllowsConcurrentProcessing() bool {
 	return len(k.Images) == 0 &&
@@ -509,7 +578,9 @@ func (k *ApplicationSourceKustomize) AllowsConcurrentProcessing() bool {
 		len(k.CommonAnnotations) == 0 &&
 		k.NamePrefix == "" &&
 		k.Namespace == "" &&
-		k.NameSuffix == ""
+		k.NameSuffix == "" &&
+		len(k.Patches) == 0 &&
+		len(k.Components) == 0
 }
 
 // IsZero returns true when the Kustomize options are considered empty
@@ -522,7 +593,9 @@ func (k *ApplicationSourceKustomize) IsZero() bool {
 			len(k.Images) == 0 &&
 			len(k.Replicas) == 0 &&
 			len(k.CommonLabels) == 0 &&
-			len(k.CommonAnnotations) == 0
+			len(k.CommonAnnotations) == 0 &&
+			len(k.Patches) == 0 &&
+			len(k.Components) == 0
 }
 
 // MergeImage merges a new Kustomize image identifier in to a list of images
@@ -853,12 +926,12 @@ func (c *ApplicationSourcePlugin) RemoveEnvEntry(key string) error {
 
 // ApplicationDestination holds information about the application's destination
 type ApplicationDestination struct {
-	// Server specifies the URL of the target cluster and must be set to the Kubernetes control plane API
+	// Server specifies the URL of the target cluster's Kubernetes control plane API. This must be set if Name is not set.
 	Server string `json:"server,omitempty" protobuf:"bytes,1,opt,name=server"`
 	// Namespace specifies the target namespace for the application's resources.
 	// The namespace will only be set for namespace-scoped resources that have not set a value for .metadata.namespace
 	Namespace string `json:"namespace,omitempty" protobuf:"bytes,2,opt,name=namespace"`
-	// Name is an alternate way of specifying the target cluster by its symbolic name
+	// Name is an alternate way of specifying the target cluster by its symbolic name. This must be set if Server is not set.
 	Name string `json:"name,omitempty" protobuf:"bytes,3,opt,name=name"`
 
 	// nolint:govet
@@ -901,6 +974,35 @@ type ApplicationStatus struct {
 	SourceTypes []ApplicationSourceType `json:"sourceTypes,omitempty" protobuf:"bytes,12,opt,name=sourceTypes"`
 	// ControllerNamespace indicates the namespace in which the application controller is located
 	ControllerNamespace string `json:"controllerNamespace,omitempty" protobuf:"bytes,13,opt,name=controllerNamespace"`
+}
+
+// GetRevisions will return the current revision associated with the Application.
+// If app has multisources, it will return all corresponding revisions preserving
+// order from the app.spec.sources. If app has only one source, it will return a
+// single revision in the list.
+func (a *ApplicationStatus) GetRevisions() []string {
+	revisions := []string{}
+	if len(a.Sync.Revisions) > 0 {
+		revisions = a.Sync.Revisions
+	} else if a.Sync.Revision != "" {
+		revisions = append(revisions, a.Sync.Revision)
+	}
+	return revisions
+}
+
+// BuildComparedToStatus will build a ComparedTo object based on the current
+// Application state.
+func (app *Application) BuildComparedToStatus() ComparedTo {
+	ct := ComparedTo{
+		Destination:       app.Spec.Destination,
+		IgnoreDifferences: app.Spec.IgnoreDifferences,
+	}
+	if app.Spec.HasMultipleSources() {
+		ct.Sources = app.Spec.Sources
+	} else {
+		ct.Source = app.Spec.GetSource()
+	}
+	return ct
 }
 
 // JWTTokens represents a list of JWT tokens
@@ -1087,11 +1189,12 @@ type SyncPolicy struct {
 	Retry *RetryStrategy `json:"retry,omitempty" protobuf:"bytes,3,opt,name=retry"`
 	// ManagedNamespaceMetadata controls metadata in the given namespace (if CreateNamespace=true)
 	ManagedNamespaceMetadata *ManagedNamespaceMetadata `json:"managedNamespaceMetadata,omitempty" protobuf:"bytes,4,opt,name=managedNamespaceMetadata"`
+	// If you add a field here, be sure to update IsZero.
 }
 
 // IsZero returns true if the sync policy is empty
 func (p *SyncPolicy) IsZero() bool {
-	return p == nil || (p.Automated == nil && len(p.SyncOptions) == 0 && p.Retry == nil)
+	return p == nil || (p.Automated == nil && len(p.SyncOptions) == 0 && p.Retry == nil && p.ManagedNamespaceMetadata == nil)
 }
 
 // RetryStrategy contains information about the strategy to apply when a sync failed
@@ -1319,6 +1422,8 @@ type RevisionHistory struct {
 	Sources ApplicationSources `json:"sources,omitempty" protobuf:"bytes,8,opt,name=sources"`
 	// Revisions holds the revision of each source in sources field the sync was performed against
 	Revisions []string `json:"revisions,omitempty" protobuf:"bytes,9,opt,name=revisions"`
+	// InitiatedBy contains information about who initiated the operations
+	InitiatedBy OperationInitiator `json:"initiatedBy,omitempty" protobuf:"bytes,10,opt,name=initiatedBy"`
 }
 
 // ApplicationWatchEvent contains information about application change.
@@ -1406,6 +1511,8 @@ type ComparedTo struct {
 	Destination ApplicationDestination `json:"destination" protobuf:"bytes,2,opt,name=destination"`
 	// Sources is a reference to the application's multiple sources used for comparison
 	Sources ApplicationSources `json:"sources,omitempty" protobuf:"bytes,3,opt,name=sources"`
+	// IgnoreDifferences is a reference to the application's ignored differences used for comparison
+	IgnoreDifferences IgnoreDifferences `json:"ignoreDifferences,omitempty" protobuf:"bytes,4,opt,name=ignoreDifferences"`
 }
 
 // SyncStatus contains information about the currently observed live and desired states of an application
@@ -1413,7 +1520,8 @@ type SyncStatus struct {
 	// Status is the sync state of the comparison
 	Status SyncStatusCode `json:"status" protobuf:"bytes,1,opt,name=status,casttype=SyncStatusCode"`
 	// ComparedTo contains information about what has been compared
-	ComparedTo ComparedTo `json:"comparedTo,omitempty" protobuf:"bytes,2,opt,name=comparedTo"`
+	// +patchStrategy=replace
+	ComparedTo ComparedTo `json:"comparedTo,omitempty" protobuf:"bytes,2,opt,name=comparedTo" patchStrategy:"replace"`
 	// Revision contains information about the revision the comparison has been performed to
 	Revision string `json:"revision,omitempty" protobuf:"bytes,3,opt,name=revision"`
 	// Revisions contains information about the revisions of multiple sources the comparison has been performed to
@@ -1597,7 +1705,7 @@ type ResourceStatus struct {
 	SyncWave        int64          `json:"syncWave,omitempty" protobuf:"bytes,10,opt,name=syncWave"`
 }
 
-// GroupKindVersion returns the GVK schema type for given resource status
+// GroupVersionKind returns the GVK schema type for given resource status
 func (r *ResourceStatus) GroupVersionKind() schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: r.Group, Version: r.Version, Kind: r.Kind}
 }
@@ -1770,6 +1878,9 @@ type AWSAuthConfig struct {
 
 	// RoleARN contains optional role ARN. If set then AWS IAM Authenticator assume a role to perform cluster operations instead of the default AWS credential provider chain.
 	RoleARN string `json:"roleARN,omitempty" protobuf:"bytes,2,opt,name=roleARN"`
+
+	// Profile contains optional role ARN. If set then AWS IAM Authenticator uses the profile to perform cluster operations instead of the default AWS credential provider chain.
+	Profile string `json:"profile,omitempty" protobuf:"bytes,3,opt,name=profile"`
 }
 
 // ExecProviderConfig is config used to call an external command to perform cluster authentication
@@ -1934,9 +2045,11 @@ type ResourceActionDefinition struct {
 // TODO: describe this type
 // TODO: describe members of this type
 type ResourceAction struct {
-	Name     string                `json:"name,omitempty" protobuf:"bytes,1,opt,name=name"`
-	Params   []ResourceActionParam `json:"params,omitempty" protobuf:"bytes,2,rep,name=params"`
-	Disabled bool                  `json:"disabled,omitempty" protobuf:"varint,3,opt,name=disabled"`
+	Name        string                `json:"name,omitempty" protobuf:"bytes,1,opt,name=name"`
+	Params      []ResourceActionParam `json:"params,omitempty" protobuf:"bytes,2,rep,name=params"`
+	Disabled    bool                  `json:"disabled,omitempty" protobuf:"varint,3,opt,name=disabled"`
+	IconClass   string                `json:"iconClass,omitempty" protobuf:"bytes,4,opt,name=iconClass"`
+	DisplayName string                `json:"displayName,omitempty" protobuf:"bytes,5,opt,name=displayName"`
 }
 
 // TODO: describe this type
@@ -1988,6 +2101,12 @@ func isValidResource(resource string) bool {
 	return validResources[resource]
 }
 
+func isValidObject(proj string, object string) bool {
+	// match against <PROJECT>[/<NAMESPACE>]/<APPLICATION>
+	objectRegexp, err := regexp.Compile(fmt.Sprintf(`^%s(/[*\w-.]+)?/[*\w-.]+$`, regexp.QuoteMeta(proj)))
+	return objectRegexp.MatchString(object) && err == nil
+}
+
 func validatePolicy(proj string, role string, policy string) error {
 	policyComponents := strings.Split(policy, ",")
 	if len(policyComponents) != 6 || strings.Trim(policyComponents[0], " ") != "p" {
@@ -2011,9 +2130,8 @@ func validatePolicy(proj string, role string, policy string) error {
 	}
 	// object
 	object := strings.Trim(policyComponents[4], " ")
-	objectRegexp, err := regexp.Compile(fmt.Sprintf(`^%s/[*\w-.]+$`, regexp.QuoteMeta(proj)))
-	if err != nil || !objectRegexp.MatchString(object) {
-		return status.Errorf(codes.InvalidArgument, "invalid policy rule '%s': object must be of form '%s/*' or '%s/<APPNAME>', not '%s'", policy, proj, proj, object)
+	if !isValidObject(proj, object) {
+		return status.Errorf(codes.InvalidArgument, "invalid policy rule '%s': object must be of form '%s/*', '%s[/<NAMESPACE>]/<APPNAME>' or '%s/<APPNAME>', not '%s'", policy, proj, proj, proj, object)
 	}
 	// effect
 	effect := strings.Trim(policyComponents[5], " ")
@@ -2469,11 +2587,11 @@ func (w *SyncWindow) Validate() error {
 	specParser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	_, err := specParser.Parse(w.Schedule)
 	if err != nil {
-		return fmt.Errorf("cannot parse schedule '%s': %s", w.Schedule, err)
+		return fmt.Errorf("cannot parse schedule '%s': %w", w.Schedule, err)
 	}
 	_, err = time.ParseDuration(w.Duration)
 	if err != nil {
-		return fmt.Errorf("cannot parse duration '%s': %s", w.Duration, err)
+		return fmt.Errorf("cannot parse duration '%s': %w", w.Duration, err)
 	}
 	return nil
 }
@@ -2563,6 +2681,18 @@ func (app *Application) IsRefreshRequested() (RefreshType, bool) {
 		refreshType = RefreshTypeHard
 	}
 	return refreshType, true
+}
+
+func (app *Application) HasPostDeleteFinalizer(stage ...string) bool {
+	return getFinalizerIndex(app.ObjectMeta, strings.Join(append([]string{PostDeleteFinalizerName}, stage...), "/")) > -1
+}
+
+func (app *Application) SetPostDeleteFinalizer(stage ...string) {
+	setFinalizer(&app.ObjectMeta, strings.Join(append([]string{PostDeleteFinalizerName}, stage...), "/"), true)
+}
+
+func (app *Application) UnSetPostDeleteFinalizer(stage ...string) {
+	setFinalizer(&app.ObjectMeta, strings.Join(append([]string{PostDeleteFinalizerName}, stage...), "/"), false)
 }
 
 // SetCascadedDeletion will enable cascaded deletion by setting the propagation policy finalizer
@@ -2839,6 +2969,12 @@ func SetK8SConfigDefaults(config *rest.Config) error {
 	config.Timeout = K8sServerSideTimeout
 
 	config.Transport = tr
+	maxRetries := env.ParseInt64FromEnv(utilhttp.EnvRetryMax, 0, 1, math.MaxInt64)
+	if maxRetries > 0 {
+		backoffDurationMS := env.ParseInt64FromEnv(utilhttp.EnvRetryBaseBackoff, 100, 1, math.MaxInt64)
+		backoffDuration := time.Duration(backoffDurationMS) * time.Millisecond
+		config.WrapTransport = utilhttp.WithRetry(maxRetries, backoffDuration)
+	}
 	return nil
 }
 
@@ -2851,7 +2987,12 @@ func (c *Cluster) RawRestConfig() *rest.Config {
 		if exists {
 			config, err = clientcmd.BuildConfigFromFlags("", conf)
 		} else {
-			config, err = clientcmd.BuildConfigFromFlags("", filepath.Join(os.Getenv("HOME"), ".kube", "config"))
+			var homeDir string
+			homeDir, err = os.UserHomeDir()
+			if err != nil {
+				homeDir = ""
+			}
+			config, err = clientcmd.BuildConfigFromFlags("", filepath.Join(homeDir, ".kube", "config"))
 		}
 	} else if c.Server == KubernetesInternalAPIServerAddr && c.Config.Username == "" && c.Config.Password == "" && c.Config.BearerToken == "" {
 		config, err = rest.InClusterConfig()
@@ -2875,6 +3016,9 @@ func (c *Cluster) RawRestConfig() *rest.Config {
 			args := []string{"aws", "--cluster-name", c.Config.AWSAuthConfig.ClusterName}
 			if c.Config.AWSAuthConfig.RoleARN != "" {
 				args = append(args, "--role-arn", c.Config.AWSAuthConfig.RoleARN)
+			}
+			if c.Config.AWSAuthConfig.Profile != "" {
+				args = append(args, "--profile", c.Config.AWSAuthConfig.Profile)
 			}
 			config = &rest.Config{
 				Host:            c.Server,

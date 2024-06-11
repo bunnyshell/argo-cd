@@ -5,9 +5,10 @@ import {Revision} from '../../../shared/components/revision';
 import {Timestamp} from '../../../shared/components/timestamp';
 import * as models from '../../../shared/models';
 import {services} from '../../../shared/services';
-import {ApplicationSyncWindowStatusIcon, ComparisonStatusIcon, getAppDefaultSource, getAppOperationState} from '../utils';
-import {getConditionCategory, HealthStatusIcon, OperationState, syncStatusMessage, helpTip} from '../utils';
+import {ApplicationSyncWindowStatusIcon, ComparisonStatusIcon, getAppDefaultSource, getAppDefaultSyncRevisionExtra, getAppOperationState} from '../utils';
+import {getConditionCategory, HealthStatusIcon, OperationState, syncStatusMessage, getAppDefaultSyncRevision} from '../utils';
 import {RevisionMetadataPanel} from './revision-metadata-panel';
+import * as utils from '../utils';
 
 import './application-status-panel.scss';
 
@@ -16,6 +17,7 @@ interface Props {
     showDiff?: () => any;
     showOperation?: () => any;
     showConditions?: () => any;
+    showExtension?: (id: string) => any;
     showMetadataInfo?: (revision: string) => any;
 }
 
@@ -31,21 +33,16 @@ const sectionLabel = (info: SectionInfo) => (
     </label>
 );
 
-const sectionHeader = (info: SectionInfo, hasMultipleSources: boolean, onClick?: () => any) => {
+const sectionHeader = (info: SectionInfo, onClick?: () => any) => {
     return (
         <div style={{display: 'flex', alignItems: 'center', marginBottom: '0.5em'}}>
             {sectionLabel(info)}
-            {onClick && (
-                <button className='application-status-panel__more-button' onClick={onClick} disabled={hasMultipleSources}>
-                    {hasMultipleSources && helpTip('More details are not supported for apps with multiple sources')}
-                    <i className='fa fa-ellipsis-h' />
-                </button>
-            )}
+            {onClick && <button className='application-status-panel__more-button' />}
         </div>
     );
 };
 
-export const ApplicationStatusPanel = ({application, showDiff, showOperation, showConditions, showMetadataInfo}: Props) => {
+export const ApplicationStatusPanel = ({application, showDiff, showOperation, showConditions, showExtension, showMetadataInfo}: Props) => {
     const today = new Date();
 
     let daysSinceLastSynchronized = 0;
@@ -63,15 +60,17 @@ export const ApplicationStatusPanel = ({application, showDiff, showOperation, sh
         showOperation = null;
     }
 
+    const statusExtensions = services.extensions.getStatusPanelExtensions();
+
+    let revision = getAppDefaultSyncRevision(application);
     const infos = cntByCategory.get('info');
     const warnings = cntByCategory.get('warning');
     const errors = cntByCategory.get('error');
     const source = getAppDefaultSource(application);
-    const hasMultipleSources = application.spec.sources && application.spec.sources.length > 0;
     return (
         <div className='application-status-panel row'>
             <div className='application-status-panel__item'>
-                <div style={{marginBottom: '1em'}}>{sectionLabel({title: 'APP HEALTH', helpContent: 'The health status of your app'})}</div>
+                <div style={{lineHeight: '19.5px', marginBottom: '0.3em'}}>{sectionLabel({title: 'APP HEALTH', helpContent: 'The health status of your app'})}</div>
                 <div className='application-status-panel__item-value'>
                     <HealthStatusIcon state={application.status.health} />
                     &nbsp;
@@ -86,33 +85,31 @@ export const ApplicationStatusPanel = ({application, showDiff, showOperation, sh
                             title: 'SYNC STATUS',
                             helpContent: 'Whether or not the version of your app is up to date with your repo. You may wish to sync your app if it is out-of-sync.'
                         },
-                        hasMultipleSources,
-                        () => showMetadataInfo(application.status.sync ? application.status.sync.revision : '')
+                        () => showMetadataInfo((revision += getAppDefaultSyncRevisionExtra(application)))
                     )}
-                    {appOperationState && (
-                        <div className={`application-status-panel__item-value application-status-panel__item-value--${appOperationState.phase}`}>
-                            <div>
-                                {application.status.sync.status === models.SyncStatuses.OutOfSync ? (
-                                    <a onClick={() => showDiff && showDiff()}>
-                                        <ComparisonStatusIcon status={application.status.sync.status} label={true} />
-                                    </a>
-                                ) : (
+                    <div className={`application-status-panel__item-value${appOperationState?.phase ? ` application-status-panel__item-value--${appOperationState.phase}` : ''}`}>
+                        <div>
+                            {application.status.sync.status === models.SyncStatuses.OutOfSync ? (
+                                <a onClick={() => showDiff && showDiff()}>
                                     <ComparisonStatusIcon status={application.status.sync.status} label={true} />
-                                )}
-                            </div>
-                            <div className='application-status-panel__item-value__revision show-for-large'>{syncStatusMessage(application)}</div>
+                                </a>
+                            ) : (
+                                <ComparisonStatusIcon status={application.status.sync.status} label={true} />
+                            )}
                         </div>
-                    )}
+                        <div className='application-status-panel__item-value__revision show-for-large'>{syncStatusMessage(application)}</div>
+                    </div>
                     <div className='application-status-panel__item-name' style={{marginBottom: '0.5em'}}>
                         {application.spec.syncPolicy?.automated ? 'Auto sync is enabled.' : 'Auto sync is not enabled.'}
                     </div>
-                    {application.status && application.status.sync && application.status.sync.revision && !application.spec.source.chart && (
+                    {application.status && application.status.sync && application.status.sync.revision && revision && !application.spec.source.chart && (
                         <div className='application-status-panel__item-name'>
                             <RevisionMetadataPanel
                                 appName={application.metadata.name}
                                 appNamespace={application.metadata.namespace}
                                 type={source.chart && 'helm'}
-                                revision={application.status.sync.revision}
+                                revision={revision}
+                                versionId={utils.getAppCurrentVersion(application)}
                             />
                         </div>
                     )}
@@ -129,29 +126,28 @@ export const ApplicationStatusPanel = ({application, showDiff, showOperation, sh
                                     daysSinceLastSynchronized +
                                     ' days since last sync. Click for the status of that sync.'
                             },
-                            hasMultipleSources,
-                            () => showMetadataInfo(appOperationState.syncResult ? appOperationState.syncResult.revision : '')
+                            () => showMetadataInfo((revision += getAppDefaultSyncRevisionExtra(application)))
                         )}
                         <div className={`application-status-panel__item-value application-status-panel__item-value--${appOperationState.phase}`}>
                             <a onClick={() => showOperation && showOperation()}>
                                 <OperationState app={application} />{' '}
                             </a>
-                            {appOperationState.syncResult && appOperationState.syncResult.revision && (
+                            {appOperationState.syncResult && revision && (
                                 <div className='application-status-panel__item-value__revision show-for-large'>
-                                    to <Revision repoUrl={source.repoURL} revision={appOperationState.syncResult.revision} />
+                                    to <Revision repoUrl={source.repoURL} revision={revision} />
                                 </div>
                             )}
                         </div>
-
                         <div className='application-status-panel__item-name' style={{marginBottom: '0.5em'}}>
                             {appOperationState.phase} <Timestamp date={appOperationState.finishedAt || appOperationState.startedAt} />
                         </div>
-                        {(appOperationState.syncResult && appOperationState.syncResult.revision && (
+                        {(appOperationState.syncResult && revision && (
                             <RevisionMetadataPanel
                                 appName={application.metadata.name}
                                 appNamespace={application.metadata.namespace}
                                 type={source.chart && 'helm'}
-                                revision={appOperationState.syncResult.revision}
+                                revision={revision}
+                                versionId={utils.getAppCurrentVersion(application)}
                             />
                         )) || <div className='application-status-panel__item-name'>{appOperationState.message}</div>}
                     </React.Fragment>
@@ -205,6 +201,7 @@ export const ApplicationStatusPanel = ({application, showDiff, showOperation, sh
                     </React.Fragment>
                 )}
             </DataLoader>
+            {statusExtensions && statusExtensions.map(ext => <ext.component key={ext.title} application={application} openFlyout={() => showExtension && showExtension(ext.id)} />)}
         </div>
     );
 };

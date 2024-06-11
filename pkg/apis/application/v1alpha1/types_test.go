@@ -11,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/argoproj/gitops-engine/pkg/diff"
 	"github.com/stretchr/testify/require"
-	"k8s.io/utils/pointer"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 
 	argocdcommon "github.com/argoproj/argo-cd/v2/common"
 
@@ -370,7 +373,7 @@ func TestAppProject_IsDestinationPermitted_PermitOnlyProjectScopedClusters(t *te
 		projDest: []ApplicationDestination{{
 			Server: "https://my-cluster.123.com", Namespace: "default",
 		}},
-		appDest: ApplicationDestination{Server: "https://some-other-cluster.com", Namespace: "default"},
+		appDest: ApplicationDestination{Server: "https://some-other-cluster.example.com", Namespace: "default"},
 		clusters: []*Cluster{{
 			Server: "https://my-cluster.123.com",
 		}},
@@ -428,7 +431,7 @@ func TestAppProject_IsDestinationPermitted_PermitOnlyProjectScopedClusters(t *te
 	_, err := proj.IsDestinationPermitted(ApplicationDestination{Server: "https://my-cluster.123.com", Namespace: "default"}, func(_ string) ([]*Cluster, error) {
 		return nil, errors.New("some error")
 	})
-	assert.NotNil(t, err)
+	assert.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "could not retrieve project clusters"))
 }
 
@@ -540,7 +543,7 @@ func TestAppProject_RemoveGroupFromRole(t *testing.T) {
 		got, err := p.RemoveGroupFromRole("test-role", "test-group")
 		assert.NoError(t, err)
 		assert.True(t, got)
-		assert.Len(t, p.Spec.Roles[0].Groups, 0)
+		assert.Empty(t, p.Spec.Roles[0].Groups)
 	})
 }
 
@@ -646,7 +649,7 @@ func TestAppProject_ValidateDestinations(t *testing.T) {
 	err = p.ValidateProject()
 	assert.NoError(t, err)
 
-	//no duplicates allowed
+	// no duplicates allowed
 	p.Spec.Destinations = []ApplicationDestination{validDestination, validDestination}
 	err = p.ValidateProject()
 	assert.Error(t, err)
@@ -836,7 +839,7 @@ func TestExplicitType(t *testing.T) {
 		},
 	}
 	explicitType, err := src.ExplicitType()
-	assert.NotNil(t, err)
+	assert.Error(t, err)
 	assert.Nil(t, explicitType)
 	src = ApplicationSource{
 		Helm: &ApplicationSourceHelm{
@@ -845,8 +848,8 @@ func TestExplicitType(t *testing.T) {
 	}
 
 	explicitType, err = src.ExplicitType()
-	assert.Nil(t, err)
-	assert.Equal(t, *explicitType, ApplicationSourceTypeHelm)
+	assert.NoError(t, err)
+	assert.Equal(t, ApplicationSourceTypeHelm, *explicitType)
 }
 
 func TestExplicitTypeWithDirectory(t *testing.T) {
@@ -855,7 +858,7 @@ func TestExplicitTypeWithDirectory(t *testing.T) {
 		Directory: &ApplicationSourceDirectory{},
 	}
 	_, err := src.ExplicitType()
-	assert.NotNil(t, err, "cannot add directory with any other types")
+	assert.Error(t, err, "cannot add directory with any other types")
 }
 
 func TestAppSourceEquality(t *testing.T) {
@@ -1380,7 +1383,7 @@ func TestApplicationSourceKustomize_MergeReplica(t *testing.T) {
 	t.Run("Replace", func(t *testing.T) {
 		k := ApplicationSourceKustomize{Replicas: KustomizeReplicas{r1}}
 		k.MergeReplica(r2)
-		assert.Equal(t, 1, len(k.Replicas))
+		assert.Len(t, k.Replicas, 1)
 		assert.Equal(t, k.Replicas[0].Name, r2.Name)
 		assert.Equal(t, k.Replicas[0].Count, r2.Count)
 	})
@@ -1620,7 +1623,7 @@ func TestSyncWindows_HasWindows(t *testing.T) {
 func TestSyncWindows_Active(t *testing.T) {
 	t.Run("WithTestProject", func(t *testing.T) {
 		proj := newTestProjectWithSyncWindows()
-		assert.Equal(t, 1, len(*proj.Spec.SyncWindows.Active()))
+		assert.Len(t, *proj.Spec.SyncWindows.Active(), 1)
 	})
 
 	syncWindow := func(kind string, schedule string, duration string, timeZone string) *SyncWindow {
@@ -1763,7 +1766,7 @@ func TestSyncWindows_Active(t *testing.T) {
 			if result == nil {
 				result = &SyncWindows{}
 			}
-			assert.Equal(t, tt.expectedLength, len(*result))
+			assert.Len(t, *result, tt.expectedLength)
 
 			if len(*result) == 1 {
 				assert.Equal(t, tt.syncWindow[tt.matchingIndex], (*result)[0])
@@ -1778,7 +1781,7 @@ func TestSyncWindows_InactiveAllows(t *testing.T) {
 	t.Run("WithTestProject", func(t *testing.T) {
 		proj := newTestProjectWithSyncWindows()
 		proj.Spec.SyncWindows[0].Schedule = "0 0 1 1 1"
-		assert.Equal(t, 1, len(*proj.Spec.SyncWindows.InactiveAllows()))
+		assert.Len(t, *proj.Spec.SyncWindows.InactiveAllows(), 1)
 	})
 
 	syncWindow := func(kind string, schedule string, duration string, timeZone string) *SyncWindow {
@@ -1939,7 +1942,7 @@ func TestSyncWindows_InactiveAllows(t *testing.T) {
 			if result == nil {
 				result = &SyncWindows{}
 			}
-			assert.Equal(t, tt.expectedLength, len(*result))
+			assert.Len(t, *result, tt.expectedLength)
 
 			if len(*result) == 1 {
 				assert.Equal(t, tt.syncWindow[tt.matchingIndex], (*result)[0])
@@ -1994,12 +1997,12 @@ func TestAppProjectSpec_DeleteWindow(t *testing.T) {
 	t.Run("CannotFind", func(t *testing.T) {
 		err := proj.Spec.DeleteWindow(3)
 		assert.Error(t, err)
-		assert.Equal(t, 2, len(proj.Spec.SyncWindows))
+		assert.Len(t, proj.Spec.SyncWindows, 2)
 	})
 	t.Run("Delete", func(t *testing.T) {
 		err := proj.Spec.DeleteWindow(0)
 		assert.NoError(t, err)
-		assert.Equal(t, 1, len(proj.Spec.SyncWindows))
+		assert.Len(t, proj.Spec.SyncWindows, 1)
 	})
 }
 
@@ -2009,31 +2012,31 @@ func TestSyncWindows_Matches(t *testing.T) {
 	t.Run("MatchNamespace", func(t *testing.T) {
 		proj.Spec.SyncWindows[0].Namespaces = []string{"default"}
 		windows := proj.Spec.SyncWindows.Matches(app)
-		assert.Equal(t, 1, len(*windows))
+		assert.Len(t, *windows, 1)
 		proj.Spec.SyncWindows[0].Namespaces = nil
 	})
 	t.Run("MatchCluster", func(t *testing.T) {
 		proj.Spec.SyncWindows[0].Clusters = []string{"cluster1"}
 		windows := proj.Spec.SyncWindows.Matches(app)
-		assert.Equal(t, 1, len(*windows))
+		assert.Len(t, *windows, 1)
 		proj.Spec.SyncWindows[0].Clusters = nil
 	})
 	t.Run("MatchClusterName", func(t *testing.T) {
 		proj.Spec.SyncWindows[0].Clusters = []string{"clusterName"}
 		windows := proj.Spec.SyncWindows.Matches(app)
-		assert.Equal(t, 1, len(*windows))
+		assert.Len(t, *windows, 1)
 		proj.Spec.SyncWindows[0].Clusters = nil
 	})
 	t.Run("MatchAppName", func(t *testing.T) {
 		proj.Spec.SyncWindows[0].Applications = []string{"test-app"}
 		windows := proj.Spec.SyncWindows.Matches(app)
-		assert.Equal(t, 1, len(*windows))
+		assert.Len(t, *windows, 1)
 		proj.Spec.SyncWindows[0].Applications = nil
 	})
 	t.Run("MatchWildcardAppName", func(t *testing.T) {
 		proj.Spec.SyncWindows[0].Applications = []string{"test-*"}
 		windows := proj.Spec.SyncWindows.Matches(app)
-		assert.Equal(t, 1, len(*windows))
+		assert.Len(t, *windows, 1)
 		proj.Spec.SyncWindows[0].Applications = nil
 	})
 	t.Run("NoMatch", func(t *testing.T) {
@@ -2496,7 +2499,7 @@ func TestSyncWindow_Active(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 
 			result := tt.syncWindow.active(tt.currentTime)
-			assert.Equal(t, result, tt.expectedResult)
+			assert.Equal(t, tt.expectedResult, result)
 
 		})
 	}
@@ -2855,12 +2858,12 @@ func TestSyncOptions_AddOption(t *testing.T) {
 
 func TestSyncOptions_RemoveOption(t *testing.T) {
 	options := SyncOptions{"a=1"}
-	assert.Len(t, options.RemoveOption("a=1"), 0)
-	assert.Len(t, options.RemoveOption("a=1").RemoveOption("a=1"), 0)
+	assert.Empty(t, options.RemoveOption("a=1"))
+	assert.Empty(t, options.RemoveOption("a=1").RemoveOption("a=1"))
 }
 
 func TestRevisionHistories_Trunc(t *testing.T) {
-	assert.Len(t, RevisionHistories{}.Trunc(1), 0)
+	assert.Empty(t, RevisionHistories{}.Trunc(1))
 	assert.Len(t, RevisionHistories{{}}.Trunc(1), 1)
 	assert.Len(t, RevisionHistories{{}, {}}.Trunc(1), 1)
 	// keep the last element, even with longer list
@@ -2966,7 +2969,7 @@ func TestRetryStrategy_NextRetryAtCustomBackoff(t *testing.T) {
 	retry := RetryStrategy{
 		Backoff: &Backoff{
 			Duration:    "2s",
-			Factor:      pointer.Int64Ptr(3),
+			Factor:      ptr.To(int64(3)),
 			MaxDuration: "1m",
 		},
 	}
@@ -2998,6 +3001,16 @@ func TestSourceAllowsConcurrentProcessing_KustomizeParams(t *testing.T) {
 	t.Run("Has CommonAnnotations", func(t *testing.T) {
 		src := ApplicationSource{Path: ".", Kustomize: &ApplicationSourceKustomize{
 			CommonAnnotations: map[string]string{"foo": "bar"},
+		}}
+
+		assert.False(t, src.AllowsConcurrentProcessing())
+	})
+
+	t.Run("Has Patches", func(t *testing.T) {
+		src := ApplicationSource{Path: ".", Kustomize: &ApplicationSourceKustomize{
+			Patches: KustomizePatches{{
+				Path: "test",
+			}},
 		}}
 
 		assert.False(t, src.AllowsConcurrentProcessing())
@@ -3065,11 +3078,74 @@ func TestOrphanedResourcesMonitorSettings_IsWarn(t *testing.T) {
 	settings := OrphanedResourcesMonitorSettings{}
 	assert.False(t, settings.IsWarn())
 
-	settings.Warn = pointer.BoolPtr(false)
+	settings.Warn = ptr.To(false)
 	assert.False(t, settings.IsWarn())
 
-	settings.Warn = pointer.BoolPtr(true)
+	settings.Warn = ptr.To(true)
 	assert.True(t, settings.IsWarn())
+}
+
+func Test_isValidPolicy(t *testing.T) {
+	policyTests := []struct {
+		name    string
+		policy  string
+		isValid bool
+	}{
+		{
+			name:    "policy with full wildcard",
+			policy:  "some-project/*",
+			isValid: true,
+		},
+		{
+			name:    "policy with specified project and application",
+			policy:  "some-project/some-application",
+			isValid: true,
+		},
+		{
+			name:    "policy with full wildcard namespace and application",
+			policy:  "some-project/*/*",
+			isValid: true,
+		},
+		{
+			name:    "policy with wildcard namespace and specified application",
+			policy:  "some-project/*/some-application",
+			isValid: true,
+		},
+		{
+			name:    "policy with specified namespace and wildcard application",
+			policy:  "some-project/some-namespace/*",
+			isValid: true,
+		},
+		{
+			name:    "policy with wildcard prefix namespace and specified application",
+			policy:  "some-project/some-name*/some-application",
+			isValid: true,
+		},
+		{
+			name:    "policy with specified namespace and wildcard prefixed application",
+			policy:  "some-project/some-namespace/some-app*",
+			isValid: true,
+		},
+		{
+			name:    "policy with valid namespace and application",
+			policy:  "some-project/some-namespace/some-application",
+			isValid: true,
+		},
+		{
+			name:    "policy with invalid namespace character",
+			policy:  "some-project/some~namespace/some-application",
+			isValid: false,
+		},
+		{
+			name:    "policy with invalid application character",
+			policy:  "some-project/some-namespace/some^application",
+			isValid: false,
+		},
+	}
+
+	for _, policyTest := range policyTests {
+		assert.Equal(t, policyTest.isValid, isValidObject("some-project", policyTest.policy), policyTest.name)
+	}
 }
 
 func Test_validatePolicy_projIsNotRegex(t *testing.T) {
@@ -3156,7 +3232,7 @@ func TestGetCAPath(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
-	os.Setenv(argocdcommon.EnvVarTLSDataPath, temppath)
+	t.Setenv(argocdcommon.EnvVarTLSDataPath, temppath)
 	validcert := []string{
 		"https://foo.example.com",
 		"oci://foo.example.com",
@@ -3347,7 +3423,7 @@ func TestGetSummary(t *testing.T) {
 	app := newTestApp()
 
 	summary := tree.GetSummary(app)
-	assert.Equal(t, len(summary.ExternalURLs), 0)
+	assert.Empty(t, summary.ExternalURLs)
 
 	const annotationName = argocdcommon.AnnotationKeyLinkPrefix + "/my-link"
 	const url = "https://example.com"
@@ -3355,15 +3431,15 @@ func TestGetSummary(t *testing.T) {
 	app.Annotations[annotationName] = url
 
 	summary = tree.GetSummary(app)
-	assert.Equal(t, len(summary.ExternalURLs), 1)
-	assert.Equal(t, summary.ExternalURLs[0], url)
+	assert.Len(t, summary.ExternalURLs, 1)
+	assert.Equal(t, url, summary.ExternalURLs[0])
 }
 
 func TestApplicationSourcePluginParameters_Environ_string(t *testing.T) {
 	params := ApplicationSourcePluginParameters{
 		{
 			Name:    "version",
-			String_: pointer.String("1.2.3"),
+			String_: ptr.To("1.2.3"),
 		},
 	}
 	environ, err := params.Environ()
@@ -3420,7 +3496,7 @@ func TestApplicationSourcePluginParameters_Environ_all(t *testing.T) {
 	params := ApplicationSourcePluginParameters{
 		{
 			Name:    "some-name",
-			String_: pointer.String("1.2.3"),
+			String_: ptr.To("1.2.3"),
 			OptionalArray: &OptionalArray{
 				Array: []string{"redis", "minio"},
 			},
@@ -3609,4 +3685,83 @@ func TestOptionalMapEquality(t *testing.T) {
 			assert.Equal(t, testCopy.expected, testCopy.a.Equals(testCopy.b))
 		})
 	}
+}
+
+func TestApplicationSpec_GetSourcePtrByIndex(t *testing.T) {
+	testCases := []struct {
+		name        string
+		application ApplicationSpec
+		sourceIndex int
+		expected    *ApplicationSource
+	}{
+		{
+			name: "HasMultipleSources_ReturnsFirstSource",
+			application: ApplicationSpec{
+				Sources: []ApplicationSource{
+					{RepoURL: "https://github.com/argoproj/test1.git"},
+					{RepoURL: "https://github.com/argoproj/test2.git"},
+				},
+			},
+			sourceIndex: 0,
+			expected:    &ApplicationSource{RepoURL: "https://github.com/argoproj/test1.git"},
+		},
+		{
+			name: "HasMultipleSources_ReturnsSourceAtIndex",
+			application: ApplicationSpec{
+				Sources: []ApplicationSource{
+					{RepoURL: "https://github.com/argoproj/test1.git"},
+					{RepoURL: "https://github.com/argoproj/test2.git"},
+				},
+			},
+			sourceIndex: 1,
+			expected:    &ApplicationSource{RepoURL: "https://github.com/argoproj/test2.git"},
+		},
+		{
+			name: "HasSingleSource_ReturnsSource",
+			application: ApplicationSpec{
+				Source: &ApplicationSource{RepoURL: "https://github.com/argoproj/test.git"},
+			},
+			sourceIndex: 0,
+			expected:    &ApplicationSource{RepoURL: "https://github.com/argoproj/test.git"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := tc.application.GetSourcePtrByIndex(tc.sourceIndex)
+			assert.Equal(t, tc.expected, actual)
+		})
+	}
+}
+
+func TestHelmValuesObjectHasReplaceStrategy(t *testing.T) {
+	app := Application{
+		Status: ApplicationStatus{Sync: SyncStatus{ComparedTo: ComparedTo{
+			Source: ApplicationSource{
+				Helm: &ApplicationSourceHelm{
+					ValuesObject: &runtime.RawExtension{
+						Object: &unstructured.Unstructured{Object: map[string]interface{}{"key": []string{"value"}}},
+					},
+				},
+			},
+		}}},
+	}
+
+	appModified := Application{
+		Status: ApplicationStatus{Sync: SyncStatus{ComparedTo: ComparedTo{
+			Source: ApplicationSource{
+				Helm: &ApplicationSourceHelm{
+					ValuesObject: &runtime.RawExtension{
+						Object: &unstructured.Unstructured{Object: map[string]interface{}{"key": []string{"value-modified1"}}},
+					},
+				},
+			},
+		}}},
+	}
+
+	patch, _, err := diff.CreateTwoWayMergePatch(
+		app,
+		appModified, Application{})
+	require.NoError(t, err)
+	assert.Equal(t, `{"status":{"sync":{"comparedTo":{"destination":{},"source":{"helm":{"valuesObject":{"key":["value-modified1"]}},"repoURL":""}}}}}`, string(patch))
 }

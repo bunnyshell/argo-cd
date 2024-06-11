@@ -15,18 +15,26 @@ func TestCookieMaxLength(t *testing.T) {
 
 	// keys will be of format foo, foo-1, foo-2 ..
 	cookies, err = MakeCookieMetadata("foo", strings.Repeat("_", (maxCookieLength-5)*maxCookieNumber))
-	assert.EqualError(t, err, "the authentication token is 40880 characters long and requires 11 cookies but the max number of cookies is 10. Contact your Argo CD administrator to increase the max number of cookies")
-	assert.Equal(t, 0, len(cookies))
+	assert.EqualError(t, err, "the authentication token is 81760 characters long and requires 21 cookies but the max number of cookies is 20. Contact your Argo CD administrator to increase the max number of cookies")
+	assert.Empty(t, cookies)
+}
+
+func TestCookieWithAttributes(t *testing.T) {
+	flags := []string{"SameSite=lax", "httpOnly"}
+
+	cookies, err := MakeCookieMetadata("foo", "bar", flags...)
+	assert.NoError(t, err)
+	assert.Equal(t, "foo=bar; SameSite=lax; httpOnly", cookies[0])
 }
 
 func TestSplitCookie(t *testing.T) {
 	cookieValue := strings.Repeat("_", (maxCookieLength-6)*4)
 	cookies, err := MakeCookieMetadata("foo", cookieValue)
 	assert.NoError(t, err)
-	assert.Equal(t, 4, len(cookies))
-	assert.Equal(t, 2, len(strings.Split(cookies[0], "=")))
+	assert.Len(t, cookies, 4)
+	assert.Len(t, strings.Split(cookies[0], "="), 2)
 	token := strings.Split(cookies[0], "=")[1]
-	assert.Equal(t, 2, len(strings.Split(token, ":")))
+	assert.Len(t, strings.Split(token, ":"), 2)
 	assert.Equal(t, "4", strings.Split(token, ":")[0])
 
 	cookies = append(cookies, "bar=this-entry-should-be-filtered")
@@ -66,10 +74,10 @@ func TestTransportWithHeader(t *testing.T) {
 	}
 	resp, err := client.Do(req)
 	assert.NoError(t, err)
-	assert.Equal(t, resp.Header, http.Header{
+	assert.Equal(t, http.Header{
 		"Bar": []string{"req_1"},
 		"Foo": []string{"req_1"},
-	})
+	}, resp.Header)
 
 	// with default headers.
 	client.Transport = &TransportWithHeader{
@@ -80,8 +88,8 @@ func TestTransportWithHeader(t *testing.T) {
 	}
 	resp, err = client.Do(req)
 	assert.NoError(t, err)
-	assert.Equal(t, resp.Header, http.Header{
+	assert.Equal(t, http.Header{
 		"Bar": []string{"req_1"},
 		"Foo": []string{"default_1", "default_2", "req_1"},
-	})
+	}, resp.Header)
 }
