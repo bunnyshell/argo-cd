@@ -13,6 +13,21 @@ spec:
           labels:
             app.kubernetes.io/name: ttyd
         spec:
+          initContainers:
+          - name: ttyd-login
+            image: argocd-ttyd-image
+            command:
+              - /bin/bash
+            args:
+              - -c
+              - "./login.sh"
+            env:
+              - name: ARGOCD_PASS
+                value: %ARGOCD_PASS%
+              - name: ARGOCD_INITIAL_PASS
+                value: %ARGOCD_INITIAL_PASS%
+              - name: ARGOCD_SERVER
+                value: %ARGOCD_SERVER%
           containers:
           - name: ttyd
             image: argocd-ttyd-image
