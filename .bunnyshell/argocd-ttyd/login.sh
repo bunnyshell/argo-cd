@@ -6,16 +6,15 @@ initialPass=${ARGOCD_INITIAL_PASS}
 
 if [[ ! -z "$initialPass" ]]; then
   echo "logging in with initial pass..."
-  argocd login --username admin --password $initialPass --insecure $serverAddr
+  argocd login --username admin --password $initialPass --insecure --skip-test-tls $serverAddr
   if [ $? -eq 0 ]; then
      echo "setting new pass..."
      argocd account update-password --current-password $initialPass --new-password $newPass
   else
      echo "logging in with new pass..."
-     argocd login --username admin --password $newPass --insecure $serverAddr
+     argocd login --username admin --password $newPass --insecure --skip-test-tls $serverAddr
   fi
 else
   echo "logging in with new pass..."
-  argocd login --username admin --password $newPass --insecure $serverAddr
+  argocd login --username admin --password $newPass --insecure --skip-test-tls $serverAddr
 fi
-
