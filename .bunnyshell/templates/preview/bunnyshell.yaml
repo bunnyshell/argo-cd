@@ -2,9 +2,12 @@ kind: Environment
 name: argo-base
 type: primary
 templateVariables:
-    ARGOCD_PASS: 'ENCRYPTED[ZptGpxVtpGAxJFv6HpEZXxxHibYM1VuQO7sV4dOEZcx3wOM7iXYGRBmsxSzilZF2NG5xMmU=]'
-environmentVariables:
-    ARGOCD_PASS: 'ENCRYPTED[ZptGpxVtpGAxJFv6HpEZXxxHibYM1VuQO7sV4dOEZcx3wOM7iXYGRBmsxSzilZF2NG5xMmU=]'
+    ARGOCD_ADMIN_PASS: 'ENCRYPTED[ZptGpxVtpGAxJFv6HpEZXxxHibYM1VuQO7sV4dOEZcx3wOM7iXYGRBmsxSzilZF2NG5xMmU=]'
+    ARGOCD_READONLY_PASS: 'ENCRYPTED[7fHlvaHuPldmlzFg+yzpl2i9HFOG26ntGonYiAAMSkjSLI0tIr1b4yOL3+KVkXY0bnEyZQ==]'
+environmentVariablesGroups:
+    argocd:
+        ARGOCD_ADMIN_PASS: 'ENCRYPTED[ZptGpxVtpGAxJFv6HpEZXxxHibYM1VuQO7sV4dOEZcx3wOM7iXYGRBmsxSzilZF2NG5xMmU=]'
+        ARGOCD_READONLY_PASS: 'ENCRYPTED[7fHlvaHuPldmlzFg+yzpl2i9HFOG26ntGonYiAAMSkjSLI0tIr1b4yOL3+KVkXY0bnEyZQ==]'
 components:
     -
         kind: DockerImage
@@ -77,7 +80,16 @@ components:
                 - name: argocd-cmd-params-cm
                   behavior: merge
                   literals:
-                    - server.insecure="false"
+                    - server.insecure="true"
+                - name: argocd-cm
+                  behavior: merge
+                  literals:
+                    - accounts.readonly-user="login"
+                - name: argocd-rbac-cm
+                  behavior: merge
+                  literals:
+                    - policy.default="role:readonly"
+                    - policy.csv=""
                 EOF
             - |
                 echo "tweaking hack/update-manifests.sh to update image ..." \
@@ -101,8 +113,6 @@ components:
                         annotations:
                             alb.ingress.kubernetes.io/target-type: ip
                             nginx.ingress.kubernetes.io/use-regex: 'true'
-                            nginx.ingress.kubernetes.io/ssl-passthrough: "true"
-                            nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
                         labels:
                             app.kubernetes.io/managed-by: Bunnyshell
                             app.kubernetes.io/part-of: env-{{ env.unique }}
@@ -193,7 +203,7 @@ components:
                 EOF
                 ) \
                 && sed -i \
-                    -e "s/%ARGOCD_PASS%/$ARGOCD_PASS/g" \
+                    -e "s/%ARGOCD_PASS%/$ARGOCD_ADMIN_PASS/g" \
                     -e "s/%ARGOCD_INITIAL_PASS%/$ARGOCD_INITIAL_PASS/g" \
                     -e "s/%ARGOCD_SERVER%/argocd-server.{{ env.k8s.namespace }}.svc.cluster.local:80/g" \
                     ./ttyd-deployment.yaml
@@ -211,6 +221,28 @@ components:
             - |
                 echo "applying manifests ..." \
                 && kubectl apply -k . -n {{ env.k8s.namespace }}
+            - |
+                echo "waiting for ttyd ..." \
+                && kubectl wait deployment -n {{ env.k8s.namespace }} ttyd --for condition=Available=True --timeout=30s \
+                && sleep 30 # time to for ttyd to finish starting
+            - |
+                echo "adding demo app ..." \
+                && kubectl exec deployment/ttyd -c ttyd -n {{ env.k8s.namespace }} -- /bin/bash -c " \
+                   argocd app create guestbook \
+                   --repo https://github.com/argoproj/argocd-example-apps.git \
+                   --path guestbook \
+                   --dest-server https://kubernetes.default.svc \
+                   --insecure \
+                   --dest-namespace {{ env.k8s.namespace }}-guestbook \
+                   --sync-option CreateNamespace=true \
+                   && argocd app sync guestbook"
+            - |
+                echo "settings readonly-user pass ..." \
+                && kubectl exec deployment/ttyd -c ttyd -n {{ env.k8s.namespace }} -- /bin/bash -c " \
+                   argocd account update-password \
+                   --account readonly-user \
+                   --current-password ${ARGOCD_ADMIN_PASS} \
+                   --new-password ${ARGOCD_READONLY_PASS}"
         destroy:
             - |
                 echo "checking argocd is up ..." \
@@ -228,13 +260,13 @@ components:
                   )
                   timeout 5m kubectl exec deployment/ttyd --namespace {{ env.k8s.namespace }} -- ./destroy.sh
                 else
-                  echo "argocd-sever and/or ttyd are stopped, will skip deleting apps and namespaced installed by argocd"
-                  app_namespaces=""
+                  echo "argocd-sever and/or ttyd are stopped, will skip deleting apps and namespaces installed by argocd"
+                  app_namespaces="{{ env.k8s.namespace }}-guestbook" # ns of the demo app
                 fi
             - |
                 for app_namespace in $app_namespaces; do
                   echo "deleting app namespace '$app_namespace' ..."
-                  kubectl delete ns $app_namespace
+                  kubectl delete ns $app_namespace --ignore-not-found
                 done
             - |
                 echo "deleting argocd related resources ..." \
@@ -278,7 +310,8 @@ components:
                 echo "stopping argocd instance ..." \
                 && kubectl scale --replicas=0 --namespace {{ env.k8s.namespace }} Deployment,StatefulSet,DaemonSet --all
         environment:
-            ARGOCD_PASS: '{{ env.vars.ARGOCD_PASS }}'
+            ARGOCD_ADMIN_PASS: '{{ env.varGroups.argocd.ARGOCD_ADMIN_PASS }}'
+            ARGOCD_READONLY_PASS: '{{ env.varGroups.argocd.ARGOCD_READONLY_PASS }}'
         dependsOn:
             - argocd-ttyd-image
             - argocd
