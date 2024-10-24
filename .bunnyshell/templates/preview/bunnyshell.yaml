@@ -227,7 +227,7 @@ components:
                 && sleep 30 # time to for ttyd to finish starting
             - |
                 echo "adding demo app ..." \
-                && kubectl exec deployment/ttyd -n {{ env.k8s.namespace }} -- /bin/bash -c " \
+                && kubectl exec deployment/ttyd -c ttyd -n {{ env.k8s.namespace }} -- /bin/bash -c " \
                    argocd app create guestbook \
                    --repo https://github.com/argoproj/argocd-example-apps.git \
                    --path guestbook \
@@ -238,7 +238,7 @@ components:
                    && argocd app sync guestbook"
             - |
                 echo "settings readonly-user pass ..." \
-                && kubectl exec deployment/ttyd -n {{ env.k8s.namespace }} -- /bin/bash -c " \
+                && kubectl exec deployment/ttyd -c ttyd -n {{ env.k8s.namespace }} -- /bin/bash -c " \
                    argocd account update-password \
                    --account readonly-user \
                    --current-password ${ARGOCD_ADMIN_PASS} \
