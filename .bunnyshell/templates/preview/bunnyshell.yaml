@@ -260,13 +260,13 @@ components:
                   )
                   timeout 5m kubectl exec deployment/ttyd --namespace {{ env.k8s.namespace }} -- ./destroy.sh
                 else
-                  echo "argocd-sever and/or ttyd are stopped, will skip deleting apps and namespaced installed by argocd"
-                  app_namespaces=""
+                  echo "argocd-sever and/or ttyd are stopped, will skip deleting apps and namespaces installed by argocd"
+                  app_namespaces="{{ env.k8s.namespace }}-guestbook" # ns of the demo app
                 fi
             - |
                 for app_namespace in $app_namespaces; do
                   echo "deleting app namespace '$app_namespace' ..."
-                  kubectl delete ns $app_namespace
+                  kubectl delete ns $app_namespace --ignore-not-found
                 done
             - |
                 echo "deleting argocd related resources ..." \
