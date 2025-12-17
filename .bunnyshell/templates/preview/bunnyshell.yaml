@@ -48,7 +48,6 @@ components:
                   path: /spec/template/spec/imagePullSecrets
                   value:
                   - name: bns-reg-cred-{{ env.unique }}-0
-                  - name: bns-reg-cred-{{ env.unique }}-140
                 EOF
                 ) \
                 && kustomize edit add patch --kind Deployment --patch "$imagePullPatch" \
@@ -93,13 +92,13 @@ components:
                 EOF
             - |
                 echo "tweaking hack/update-manifests.sh to update image ..." \
-                && sed -i "s#\${IMAGE_NAMESPACE}/argocd:\${IMAGE_TAG}#\${IMAGE_FULL_NAME}#g" ./hack/update-manifests.sh
+                && sed -i "s#\${FULL_IMAGE_NAME}:\${IMAGE_TAG}#\${IMAGE_FULL_NAME}#g" ./hack/update-manifests.sh
             - |
                 echo "building manifests ..." \
                 && chmod +x ./hack/update-manifests.sh && IMAGE_TAG=none ./hack/update-manifests.sh
             - |
                 echo "applying manifests ..." \
-                && kubectl apply -f ./manifests/install.yaml -n {{ env.k8s.namespace }}
+                && kubectl apply --server-side --force-conflicts -f ./manifests/install.yaml -n {{ env.k8s.namespace }}
             - |
                 echo "setting Deployment replicas ..." \
                 && kubectl get deployments -o name -n {{ env.k8s.namespace }} | xargs -I {} kubectl patch {} -n {{ env.k8s.namespace }} --type='json' -p='[{"op": "replace", "path": "/spec/replicas", "value": 1}]'
